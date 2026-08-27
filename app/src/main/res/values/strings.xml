@@ -3,7 +3,7 @@
     <string name="app_name">Attendance Help</string>
 
     <string name="welcome_title">Attendance Help</string>
-    <string name="welcome_subtitle">Connect to the virtual server, then set this phone as Remote or Control.</string>
+    <string name="welcome_subtitle">Connect this phone to the PC hub server, then set Remote or Control mode.</string>
     <string name="choose_language">Language</string>
     <string name="language_english">English</string>
     <string name="language_arabic">العربية</string>
@@ -11,15 +11,16 @@
     <string name="back_action">Back</string>
 
     <string name="connect_title">1. Connect to server</string>
-    <string name="connect_hint">Enter the virtual server IP (Tailscale or LAN), or host the server on this phone.</string>
+    <string name="connect_hint">Enter the PC hub server IP. Phones never host the server.</string>
+    <string name="connect_ip_example">Correct examples: 172.20.1.51   or   172.20.1.51:8765</string>
     <string name="server_ip_label">Server IP</string>
+    <string name="server_ip_placeholder">172.20.1.51</string>
     <string name="phone_name_label">This phone name</string>
-    <string name="host_server_here">Host virtual server on this phone</string>
     <string name="connect_action">Connect to server</string>
-    <string name="disconnect_server">Disconnect server</string>
+    <string name="disconnect_server">Disconnect from server</string>
     <string name="server_connected">Server: Connected</string>
     <string name="server_disconnected">Server: Not connected</string>
-    <string name="your_hosted_ip">Hosted server IP</string>
+    <string name="server_connecting">Connecting…</string>
 
     <string name="mode_title">2. Phone mode</string>
     <string name="mode_hint">Choose how this phone works. Status stays in the system bar until you clear it.</string>

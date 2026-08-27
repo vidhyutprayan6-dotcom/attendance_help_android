@@ -18,6 +18,7 @@ class HubClient(
 ) {
     private val http = OkHttpClient.Builder()
         .pingInterval(20, TimeUnit.SECONDS)
+        .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(0, TimeUnit.MILLISECONDS)
         .retryOnConnectionFailure(true)
         .build()
@@ -26,34 +27,39 @@ class HubClient(
 
     fun connect(wsUrl: String) {
         disconnect()
-        val request = Request.Builder().url(wsUrl).build()
-        val ws = http.newWebSocket(request, object : WebSocketListener() {
-            override fun onOpen(webSocket: WebSocket, response: Response) = onOpen()
-            override fun onMessage(webSocket: WebSocket, text: String) {
-                codec.decode(text)?.let(onMessage)
-            }
-            override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
-                webSocket.close(code, reason)
-            }
-            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                socket.compareAndSet(webSocket, null)
-                onClosed(reason)
-            }
-            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                Timber.e(t, "Hub client failure")
-                socket.compareAndSet(webSocket, null)
-                onFailure(t)
-            }
-        })
-        socket.set(ws)
+        try {
+            val request = Request.Builder().url(wsUrl).build()
+            val ws = http.newWebSocket(request, object : WebSocketListener() {
+                override fun onOpen(webSocket: WebSocket, response: Response) = onOpen()
+                override fun onMessage(webSocket: WebSocket, text: String) {
+                    codec.decode(text)?.let(onMessage)
+                }
+                override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                    webSocket.close(code, reason)
+                }
+                override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                    socket.compareAndSet(webSocket, null)
+                    onClosed(reason)
+                }
+                override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                    Timber.e(t, "Hub client failure url=%s", wsUrl)
+                    socket.compareAndSet(webSocket, null)
+                    onFailure(t)
+                }
+            })
+            socket.set(ws)
+        } catch (t: Throwable) {
+            Timber.e(t, "Hub client connect threw for url=%s", wsUrl)
+            onFailure(t)
+        }
     }
 
     fun send(message: HubMessage) {
-        socket.get()?.send(codec.encode(message))
+        runCatching { socket.get()?.send(codec.encode(message)) }
     }
 
     fun disconnect() {
-        socket.getAndSet(null)?.close(1000, "bye")
+        runCatching { socket.getAndSet(null)?.close(1000, "bye") }
     }
 
     fun isConnected(): Boolean = socket.get() != null

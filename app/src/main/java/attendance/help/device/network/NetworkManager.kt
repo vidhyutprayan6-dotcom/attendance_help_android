@@ -43,6 +43,9 @@ class TailscaleNetworkManager @Inject constructor() : NetworkManager {
             }
         }
 
-    override fun signalingWsUrl(ipAddress: String, port: Int): String =
-        "ws://$ipAddress:$port"
+    override fun signalingWsUrl(ipAddress: String, port: Int): String {
+        val parsed = attendance.help.device.utils.ServerAddressParser.parse(ipAddress, port)
+            .getOrElse { return "ws://$ipAddress:$port" }
+        return attendance.help.device.utils.ServerAddressParser.toWsUrl(parsed)
+    }
 }

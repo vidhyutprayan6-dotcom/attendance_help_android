@@ -48,8 +48,7 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch {
             val link = sessionRepository.serverLinkState.first()
             startRoute = when {
-                link == ServerLinkState.CONNECTED ||
-                    link == ServerLinkState.HOSTING_AND_CONNECTED -> Routes.Home
+                link == ServerLinkState.CONNECTED -> Routes.Home
                 else -> Routes.Welcome
             }
         }

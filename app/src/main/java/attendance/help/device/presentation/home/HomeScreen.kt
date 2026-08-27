@@ -30,10 +30,10 @@ fun HomeScreen(
     onModeSettings: () -> Unit,
     onConnectSettings: () -> Unit,
     onRemoteList: () -> Unit,
-    onSession: () -> Unit
+    onSession: () -> Unit,
+    onDisconnect: () -> Unit
 ) {
-    val serverOk = state.serverLinkState == ServerLinkState.CONNECTED ||
-        state.serverLinkState == ServerLinkState.HOSTING_AND_CONNECTED
+    val serverOk = state.serverLinkState == ServerLinkState.CONNECTED
 
     Column(
         modifier = Modifier
@@ -51,7 +51,8 @@ fun HomeScreen(
         Text(stringResource(R.string.status_section), style = MaterialTheme.typography.titleMedium)
         Text(
             text = if (serverOk) {
-                stringResource(R.string.server_connected) + " · ${state.serverHost}"
+                stringResource(R.string.server_connected) +
+                    " · ${state.serverHost}:${state.serverPort}"
             } else {
                 stringResource(R.string.server_disconnected)
             },
@@ -81,7 +82,7 @@ fun HomeScreen(
         OutlinedButton(onClick = onConnectSettings, modifier = Modifier.fillMaxWidth()) {
             Text(stringResource(R.string.connect_title))
         }
-        Button(onClick = onModeSettings, modifier = Modifier.fillMaxWidth()) {
+        Button(onClick = onModeSettings, modifier = Modifier.fillMaxWidth(), enabled = serverOk) {
             Text(stringResource(R.string.open_mode_settings))
         }
 
@@ -104,6 +105,12 @@ fun HomeScreen(
             enabled = canOpenSession
         ) {
             Text(stringResource(R.string.open_live_session))
+        }
+
+        if (serverOk) {
+            OutlinedButton(onClick = onDisconnect, modifier = Modifier.fillMaxWidth()) {
+                Text(stringResource(R.string.disconnect_server))
+            }
         }
 
         Spacer(modifier = Modifier.height(8.dp))

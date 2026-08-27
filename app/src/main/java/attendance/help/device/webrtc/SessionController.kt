@@ -19,9 +19,8 @@ import attendance.help.device.domain.model.SessionLinkState
 import attendance.help.device.domain.repository.SessionRepository
 import attendance.help.device.network.hub.HubClient
 import attendance.help.device.network.hub.HubMessage
-import attendance.help.device.network.hub.HubServer
 import attendance.help.device.service.LinkStatusService
-import attendance.help.device.utils.TailscaleIpFinder
+import attendance.help.device.utils.ServerAddressParser
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -57,7 +56,6 @@ class SessionController @Inject constructor(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val localDeviceId by lazy { deviceIdentityProvider.getOrCreateDeviceId() }
 
-    private var hubServer: HubServer? = null
     private var hubClient: HubClient? = null
     private var peerCreated = false
     private var boundPeerId: String? = null
@@ -91,46 +89,44 @@ class SessionController @Inject constructor(
         localPipRenderer = null
     }
 
-    /** Connect to virtual server. Optionally host hub on this phone. */
-    suspend fun connectToServer(hostInput: String, hostLocally: Boolean, displayName: String) {
-        sessionRepository.setDisplayName(displayName.ifBlank { "Phone" })
-        sessionRepository.setHostingHubLocally(hostLocally)
-        sessionRepository.setServerLinkState(ServerLinkState.CONNECTING)
-        update {
-            copy(
-                hostingHubLocally = hostLocally,
-                serverLinkState = ServerLinkState.CONNECTING,
-                statusMessage = "Connecting to server…",
-                lastError = null
-            )
-        }
-
-        val advertiseHost: String
-        val connectHost: String
-        if (hostLocally) {
-            startLocalHub()
-            advertiseHost = withContext(Dispatchers.IO) {
-                TailscaleIpFinder.findPreferredIp() ?: "127.0.0.1"
+    /** Connect to PC/virtual hub only (phones never host the server). */
+    suspend fun connectToServer(hostInput: String, displayName: String) {
+        try {
+            sessionRepository.setDisplayName(displayName.ifBlank { "Phone" })
+            sessionRepository.setHostingHubLocally(false)
+            sessionRepository.setServerLinkState(ServerLinkState.CONNECTING)
+            update {
+                copy(
+                    hostingHubLocally = false,
+                    serverLinkState = ServerLinkState.CONNECTING,
+                    statusMessage = "Connecting to server…",
+                    lastError = null
+                )
             }
-            // Always loop back locally when this phone hosts the hub.
-            connectHost = "127.0.0.1"
-        } else {
-            advertiseHost = hostInput.trim()
-            connectHost = advertiseHost
+
+            val endpoint = ServerAddressParser.parse(hostInput, BuildConfig.SIGNALING_PORT)
+                .getOrElse { err ->
+                    failServer(err.message ?: "Invalid server address")
+                    return
+                }
+
+            sessionRepository.setServerHost(endpoint.host)
+            update {
+                copy(
+                    serverHost = endpoint.host,
+                    serverPort = endpoint.port,
+                    statusMessage = "Connecting to ${endpoint.host}:${endpoint.port}…"
+                )
+            }
+            openHubClient(ServerAddressParser.toWsUrl(endpoint))
+        } catch (t: Throwable) {
+            Timber.e(t, "connectToServer crashed")
+            failServer(t.message ?: "Connection failed")
         }
-        if (advertiseHost.isBlank() || connectHost.isBlank()) {
-            failServer("Enter a server IP, or host the virtual server on this phone.")
-            return
-        }
-        sessionRepository.setServerHost(advertiseHost)
-        update { copy(serverHost = advertiseHost) }
-        openHubClient(connectHost)
     }
 
     suspend fun setMode(mode: DeviceMode) {
-        if (_ui.value.serverLinkState != ServerLinkState.CONNECTED &&
-            _ui.value.serverLinkState != ServerLinkState.HOSTING_AND_CONNECTED
-        ) {
+        if (_ui.value.serverLinkState != ServerLinkState.CONNECTED) {
             failServer("Connect to the server first.")
             return
         }
@@ -256,56 +252,55 @@ class SessionController @Inject constructor(
     }
 
     suspend fun disconnectServer() {
-        clearModeToNothing()
-        hubClient?.disconnect()
-        hubClient = null
-        runCatching { hubServer?.stop() }
-        hubServer = null
-        sessionRepository.setServerLinkState(ServerLinkState.DISCONNECTED)
-        LinkStatusService.stop(context)
-        update {
-            copy(
-                serverLinkState = ServerLinkState.DISCONNECTED,
-                statusMessage = "Disconnected from server"
-            )
+        try {
+            runCatching { hubClient?.send(HubMessage.Unregister(localDeviceId)) }
+            stopMediaFully()
+            boundPeerId = null
+            hubClient?.disconnect()
+            hubClient = null
+            sessionRepository.clearModeSettings()
+            sessionRepository.setServerLinkState(ServerLinkState.DISCONNECTED)
+            sessionRepository.setHostingHubLocally(false)
+            LinkStatusService.stop(context)
+            update {
+                copy(
+                    serverLinkState = ServerLinkState.DISCONNECTED,
+                    mode = DeviceMode.NONE,
+                    sessionLinkState = SessionLinkState.IDLE,
+                    boundPeer = null,
+                    availableRemotes = emptyList(),
+                    dualCamera = DualCameraSessionState(),
+                    hostingHubLocally = false,
+                    statusMessage = "Disconnected from server",
+                    lastError = null,
+                    webrtcState = "CLOSED"
+                )
+            }
+        } catch (t: Throwable) {
+            Timber.e(t, "disconnectServer failed")
+            update {
+                copy(
+                    serverLinkState = ServerLinkState.DISCONNECTED,
+                    statusMessage = "Disconnected",
+                    lastError = t.message
+                )
+            }
         }
     }
 
-    private suspend fun startLocalHub() = withContext(Dispatchers.IO) {
-        runCatching { hubServer?.stop() }
-        val server = HubServer(BuildConfig.SIGNALING_PORT)
-        hubServer = server
-        // start() blocks; run on dedicated thread.
-        Thread(
-            {
-                runCatching { server.start() }
-                    .onFailure { Timber.e(it, "Hub start failed") }
-            },
-            "ah-hub-server"
-        ).start()
-        Thread.sleep(500)
-    }
-
-    private fun openHubClient(host: String) {
+    private fun openHubClient(wsUrl: String) {
         hubClient?.disconnect()
         val client = HubClient(
             onMessage = { handleHub(it) },
             onOpen = {
                 scope.launch {
-                    val hosting = sessionRepository.hostingHubLocally.first()
-                    val state = if (hosting) {
-                        ServerLinkState.HOSTING_AND_CONNECTED
-                    } else {
-                        ServerLinkState.CONNECTED
-                    }
-                    sessionRepository.setServerLinkState(state)
+                    sessionRepository.setServerLinkState(ServerLinkState.CONNECTED)
                     update {
                         copy(
-                            serverLinkState = state,
-                            statusMessage = "Connected to server $host — set phone mode next"
+                            serverLinkState = ServerLinkState.CONNECTED,
+                            statusMessage = "Connected to server ${serverHost}:${serverPort}"
                         )
                     }
-                    // Re-register if mode already persisted (app relaunch).
                     val mode = sessionRepository.deviceMode.first()
                     if (mode != DeviceMode.NONE) {
                         setMode(mode)
@@ -323,14 +318,20 @@ class SessionController @Inject constructor(
                             statusMessage = "Server connection closed"
                         )
                     }
+                    LinkStatusService.stop(context)
                 }
             },
             onFailure = { t ->
-                scope.launch { failServer(t.message ?: "Server connection failed") }
+                scope.launch {
+                    failServer(
+                        t.message?.takeIf { it.isNotBlank() }
+                            ?: "Cannot reach server. Check IP, Wi‑Fi, and that the hub is running."
+                    )
+                }
             }
         )
         hubClient = client
-        client.connect("ws://$host:${BuildConfig.SIGNALING_PORT}")
+        client.connect(wsUrl)
     }
 
     private fun handleHub(message: HubMessage) {
@@ -545,7 +546,7 @@ class SessionController @Inject constructor(
             val mode = sessionRepository.deviceMode.first()
             val link = sessionRepository.serverLinkState.first()
             val host = sessionRepository.serverHost.first()
-            if (link == ServerLinkState.CONNECTED || link == ServerLinkState.HOSTING_AND_CONNECTED) {
+            if (link == ServerLinkState.CONNECTED) {
                 update {
                     copy(
                         mode = mode,

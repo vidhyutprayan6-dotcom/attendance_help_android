@@ -1,5 +1,7 @@
 # Project-level ignore rules for Attendance Help
 *.iml
+/backend
+
 .gradle/
 /local.properties
 /.idea/
@@ -22,3 +24,5 @@ app/release/
 *.jks
 *.keystore
 secrets.properties
+backend/node_modules/
+backend/package-lock.json

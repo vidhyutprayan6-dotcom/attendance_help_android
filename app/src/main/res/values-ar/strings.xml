@@ -10,15 +10,16 @@
     <string name="back_action">رجوع</string>
 
     <string name="connect_title">1. الاتصال بالخادم</string>
-    <string name="connect_hint">أدخل عنوان IP للخادم (Tailscale أو الشبكة)، أو شغّل الخادم على هذا الهاتف.</string>
+    <string name="connect_hint">أدخل عنوان IP لخادم الكمبيوتر. الهاتف لا يستضيف الخادم.</string>
+    <string name="connect_ip_example">أمثلة صحيحة: 172.20.1.51   أو   172.20.1.51:8765</string>
     <string name="server_ip_label">عنوان الخادم</string>
+    <string name="server_ip_placeholder">172.20.1.51</string>
     <string name="phone_name_label">اسم هذا الهاتف</string>
-    <string name="host_server_here">تشغيل الخادم الافتراضي على هذا الهاتف</string>
     <string name="connect_action">الاتصال بالخادم</string>
-    <string name="disconnect_server">قطع اتصال الخادم</string>
+    <string name="disconnect_server">قطع الاتصال بالخادم</string>
     <string name="server_connected">الخادم: متصل</string>
     <string name="server_disconnected">الخادم: غير متصل</string>
-    <string name="your_hosted_ip">عنوان الخادم المستضاف</string>
+    <string name="server_connecting">جارٍ الاتصال…</string>
 
     <string name="mode_title">2. وضع الهاتف</string>
     <string name="mode_hint">اختر دور الهاتف. يبقى الحالة في شريط النظام حتى تمسحها.</string>

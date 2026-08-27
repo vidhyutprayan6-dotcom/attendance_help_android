@@ -13,7 +13,6 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
@@ -28,14 +27,14 @@ fun ConnectScreen(
     state: Pair<ConnectForm, AppLinkSnapshot>,
     onHostChange: (String) -> Unit,
     onNameChange: (String) -> Unit,
-    onHostLocallyChange: (Boolean) -> Unit,
     onConnect: () -> Unit,
+    onDisconnect: () -> Unit,
     onConnectedNext: () -> Unit,
     onGoHome: () -> Unit
 ) {
     val (form, snap) = state
-    val connected = snap.serverLinkState == ServerLinkState.CONNECTED ||
-        snap.serverLinkState == ServerLinkState.HOSTING_AND_CONNECTED
+    val connected = snap.serverLinkState == ServerLinkState.CONNECTED
+    val connecting = snap.serverLinkState == ServerLinkState.CONNECTING
 
     Column(
         modifier = Modifier
@@ -50,14 +49,27 @@ fun ConnectScreen(
             color = MaterialTheme.colorScheme.primary
         )
         Text(stringResource(R.string.connect_hint))
+        Text(
+            text = stringResource(R.string.connect_ip_example),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.secondary
+        )
 
-        StatusChip(
-            ok = connected,
+        Text(
             text = if (connected) {
-                stringResource(R.string.server_connected) + " · ${snap.serverHost}"
+                stringResource(R.string.server_connected) +
+                    " · ${snap.serverHost}:${snap.serverPort}"
+            } else if (connecting) {
+                stringResource(R.string.server_connecting)
             } else {
                 stringResource(R.string.server_disconnected)
-            }
+            },
+            color = when {
+                connected -> MaterialTheme.colorScheme.primary
+                connecting -> MaterialTheme.colorScheme.secondary
+                else -> MaterialTheme.colorScheme.error
+            },
+            style = MaterialTheme.typography.titleMedium
         )
 
         OutlinedTextField(
@@ -65,40 +77,45 @@ fun ConnectScreen(
             onValueChange = onNameChange,
             modifier = Modifier.fillMaxWidth(),
             label = { Text(stringResource(R.string.phone_name_label)) },
-            singleLine = true
+            singleLine = true,
+            enabled = !connected && !connecting
         )
 
-        RowSwitch(
-            checked = form.hostLocally,
-            onCheckedChange = onHostLocallyChange,
-            label = stringResource(R.string.host_server_here)
+        OutlinedTextField(
+            value = form.host,
+            onValueChange = onHostChange,
+            modifier = Modifier.fillMaxWidth(),
+            label = { Text(stringResource(R.string.server_ip_label)) },
+            placeholder = { Text(stringResource(R.string.server_ip_placeholder)) },
+            singleLine = true,
+            enabled = !connected && !connecting
         )
-
-        if (form.hostLocally) {
-            Text("${stringResource(R.string.your_hosted_ip)}: ${form.detectedIp ?: "—"}")
-        } else {
-            OutlinedTextField(
-                value = form.host,
-                onValueChange = onHostChange,
-                modifier = Modifier.fillMaxWidth(),
-                label = { Text(stringResource(R.string.server_ip_label)) },
-                singleLine = true,
-                enabled = !form.hostLocally
-            )
-        }
 
         if (snap.statusMessage.isNotBlank()) Text(snap.statusMessage)
-        snap.lastError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+        snap.lastError?.let {
+            Text(it, color = MaterialTheme.colorScheme.error)
+        }
 
         Spacer(modifier = Modifier.height(8.dp))
-        Button(
-            onClick = onConnect,
-            modifier = Modifier.fillMaxWidth(),
-            enabled = !connected
-        ) {
-            Text(stringResource(R.string.connect_action))
-        }
-        if (connected) {
+
+        if (!connected) {
+            Button(
+                onClick = onConnect,
+                modifier = Modifier.fillMaxWidth(),
+                enabled = !connecting && form.host.isNotBlank()
+            ) {
+                Text(
+                    if (connecting) stringResource(R.string.server_connecting)
+                    else stringResource(R.string.connect_action)
+                )
+            }
+        } else {
+            OutlinedButton(
+                onClick = onDisconnect,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(stringResource(R.string.disconnect_server))
+            }
             Button(onClick = onConnectedNext, modifier = Modifier.fillMaxWidth()) {
                 Text(stringResource(R.string.mode_title))
             }
@@ -106,25 +123,5 @@ fun ConnectScreen(
                 Text(stringResource(R.string.home_title))
             }
         }
-    }
-}
-
-@Composable
-private fun StatusChip(ok: Boolean, text: String) {
-    Text(
-        text = text,
-        color = if (ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
-        style = MaterialTheme.typography.titleMedium
-    )
-}
-
-@Composable
-private fun RowSwitch(checked: Boolean, onCheckedChange: (Boolean) -> Unit, label: String) {
-    androidx.compose.foundation.layout.Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween
-    ) {
-        Text(label, modifier = Modifier.weight(1f).padding(end = 12.dp))
-        Switch(checked = checked, onCheckedChange = onCheckedChange)
     }
 }

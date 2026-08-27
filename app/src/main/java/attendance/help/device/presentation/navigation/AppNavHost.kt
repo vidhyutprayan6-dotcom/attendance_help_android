@@ -41,8 +41,8 @@ fun AppNavHost(startDestination: String) {
                 state = state,
                 onHostChange = vm::onHostChange,
                 onNameChange = vm::onNameChange,
-                onHostLocallyChange = vm::onHostLocallyChange,
                 onConnect = vm::connect,
+                onDisconnect = vm::disconnect,
                 onConnectedNext = {
                     navController.navigate(Routes.Mode) {
                         popUpTo(Routes.Connect) { inclusive = false }
@@ -79,7 +79,13 @@ fun AppNavHost(startDestination: String) {
                 onModeSettings = { navController.navigate(Routes.Mode) },
                 onConnectSettings = { navController.navigate(Routes.Connect) },
                 onRemoteList = { navController.navigate(Routes.RemoteList) },
-                onSession = { navController.navigate(Routes.Session) }
+                onSession = { navController.navigate(Routes.Session) },
+                onDisconnect = {
+                    vm.disconnect()
+                    navController.navigate(Routes.Connect) {
+                        popUpTo(Routes.Home) { inclusive = true }
+                    }
+                }
             )
         }
         composable(Routes.RemoteList) {

@@ -6,7 +6,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.Surface
-import androidx.compose.ui.Modifier.Modifier
+import androidx.compose.ui.Modifier
 import attendance.help.device.presentation.navigation.AppNavHost
 import attendance.help.device.presentation.theme.AttendanceHelpTheme
 import dagger.hilt.android.AndroidEntryPoint

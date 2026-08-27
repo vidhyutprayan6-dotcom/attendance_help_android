@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="ah_primary">#0B3D2E</color>
+    <color name="ah_on_primary">#FFFFFF</color>
+    <color name="ah_secondary">#C4A35A</color>
+    <color name="ah_background">#F3F6F4</color>
+    <color name="ah_surface">#FFFFFF</color>
+    <color name="ah_on_surface">#12201A</color>
+    <color name="ic_launcher_background">#0B3D2E</color>
+</resources>

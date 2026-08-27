@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Attendance Help</string>
+
+    <string name="welcome_title">Attendance Help</string>
+    <string name="welcome_subtitle">Link two phones. Control them as one.</string>
+
+    <string name="choose_language">Choose language</string>
+    <string name="language_english">English</string>
+    <string name="language_arabic">العربية</string>
+
+    <string name="choose_role_title">Choose this phone\'s role</string>
+    <string name="role_controller">Controller</string>
+    <string name="role_controller_desc">The phone you hold. Starts cameras and sends commands.</string>
+    <string name="role_remote">Remote</string>
+    <string name="role_remote_desc">The other phone. Follows commands and shows the controller\'s face.</string>
+
+    <string name="continue_action">Continue</string>
+    <string name="home_title">Session home</string>
+    <string name="home_controller_hint">You are the Controller. Pairing and dual-camera session come next.</string>
+    <string name="home_remote_hint">You are the Remote phone. Pairing and dual-camera session come next.</string>
+    <string name="connection_status_label">Connection</string>
+    <string name="connection_status_not_paired">Not paired yet</string>
+    <string name="step1_banner">Step 1 foundation — structure ready</string>
+
+    <string name="display_rule_controller">Controller screen: your own live camera</string>
+    <string name="display_rule_remote">Remote screen: controller\'s live camera</string>
+</resources>

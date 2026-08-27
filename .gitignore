@@ -1,0 +1,24 @@
+# Project-level ignore rules for Attendance Help
+*.iml
+.gradle/
+/local.properties
+/.idea/
+.DS_Store
+/build/
+/captures/
+.externalNativeBuild/
+.cxx/
+*.apk
+*.ap_
+*.aab
+*.dex
+*.class
+bin/
+gen/
+out/
+.navigation/
+captures/
+app/release/
+*.jks
+*.keystore
+secrets.properties

@@ -135,7 +135,7 @@ fun SessionScreen(
         }
 
         Spacer(modifier = Modifier.height(12.dp))
-        Row(Modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(
                 onClick = onOpenCamera,
                 enabled = hasPermissions && mode == DeviceMode.CONTROL,

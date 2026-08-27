@@ -61,7 +61,7 @@ fun WelcomeScreen(onContinue: () -> Unit) {
         Spacer(modifier = Modifier.height(28.dp))
         Text(stringResource(R.string.choose_language), style = MaterialTheme.typography.titleMedium)
         Spacer(modifier = Modifier.height(12.dp))
-        Row(Modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             OutlinedButton(
                 onClick = {
                     AppCompatDelegate.setApplicationLocales(LocaleListCompat.forLanguageTags("en"))

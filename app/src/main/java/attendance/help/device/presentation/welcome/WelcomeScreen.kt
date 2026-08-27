@@ -85,7 +85,7 @@ fun WelcomeScreen(
         }
         Spacer(modifier = Modifier.height(16.dp))
         Text(
-            text = stringResource(R.string.step1_banner),
+            text = stringResource(R.string.ready_banner),
             style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.secondary
         )

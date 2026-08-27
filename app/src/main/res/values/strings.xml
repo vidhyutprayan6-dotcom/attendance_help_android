@@ -38,4 +38,6 @@
     <string name="refresh_ip">Refresh IP</string>
     <string name="go_session">Open live session</string>
     <string name="device_id_label">Device ID</string>
+    <string name="ready_banner">Ready — pair over Tailscale, then open dual cameras</string>
+    <string name="back_action">Back</string>
 </resources>

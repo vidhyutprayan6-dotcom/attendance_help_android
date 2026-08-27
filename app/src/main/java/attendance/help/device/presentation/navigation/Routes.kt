@@ -2,8 +2,9 @@ package attendance.help.device.presentation.navigation
 
 object Routes {
     const val Welcome = "welcome"
-    const val RoleSelect = "role_select"
+    const val Connect = "connect"
+    const val Mode = "mode"
     const val Home = "home"
-    const val Pairing = "pairing"
+    const val RemoteList = "remote_list"
     const val Session = "session"
 }

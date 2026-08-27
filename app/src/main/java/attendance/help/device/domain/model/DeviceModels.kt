@@ -1,19 +1,30 @@
 package attendance.help.device.domain.model
 
-enum class DeviceRole {
-    CONTROLLER,
-    REMOTE
+/**
+ * Phone operating mode after connecting to the virtual server.
+ * NONE = no mode / cleared back to initial state.
+ */
+enum class DeviceMode {
+    NONE,
+    REMOTE,
+    CONTROL
 }
 
-enum class ConnectionState {
-    UNKNOWN,
-    NOT_PAIRED,
-    WAITING_FOR_PEER,
-    PAIRING,
-    PAIRED_DISCONNECTED,
+enum class ServerLinkState {
+    DISCONNECTED,
     CONNECTING,
     CONNECTED,
-    RECONNECTING,
+    HOSTING_AND_CONNECTED,
+    ERROR
+}
+
+enum class SessionLinkState {
+    IDLE,
+    WAITING_FOR_CONTROL,   // remote registered, available in list
+    SELECTING_REMOTE,      // control browsing list
+    BINDING,
+    BOUND,                 // control+remote paired as one
+    STREAMING,
     ERROR
 }
 
@@ -22,41 +33,34 @@ data class DeviceIdentity(
     val displayName: String
 )
 
-data class PeerDevice(
+data class HubDevice(
     val deviceId: String,
     val displayName: String,
-    val tailscaleIp: String,
-    val lastConnectedAtEpochMs: Long? = null
+    val mode: DeviceMode,
+    val available: Boolean = true
 )
 
-data class PairingSession(
-    val pairingCode: String,
-    val controllerIp: String,
-    val signalingPort: Int
-)
-
-/**
- * Dual-camera product rules:
- * - Both cameras start/stop together.
- * - Controller UI shows local (own) camera preview.
- * - Remote UI shows the Controller's inbound video stream.
- */
 data class DualCameraSessionState(
     val isActive: Boolean = false,
-    val controllerCameraOn: Boolean = false,
-    val remoteCameraOn: Boolean = false,
-    val controllerShowsLocalPreview: Boolean = true,
-    val remoteShowsControllerStream: Boolean = true
+    val bothCamerasOn: Boolean = false,
+    /** Control phone shows remote camera feed. */
+    val controlShowsRemoteFeed: Boolean = true,
+    /** Remote phone shows control camera feed. */
+    val remoteShowsControlFeed: Boolean = true
 )
 
-data class AppSessionSnapshot(
-    val setupComplete: Boolean = false,
-    val role: DeviceRole? = null,
-    val connectionState: ConnectionState = ConnectionState.NOT_PAIRED,
-    val peer: PeerDevice? = null,
-    val localDeviceId: String = "",
-    val pairingCode: String? = null,
-    val statusMessage: String = "",
+data class AppLinkSnapshot(
+    val serverHost: String = "",
+    val serverPort: Int = 8765,
+    val hostingHubLocally: Boolean = false,
+    val serverLinkState: ServerLinkState = ServerLinkState.DISCONNECTED,
+    val mode: DeviceMode = DeviceMode.NONE,
+    val sessionLinkState: SessionLinkState = SessionLinkState.IDLE,
+    val boundPeer: HubDevice? = null,
+    val availableRemotes: List<HubDevice> = emptyList(),
     val dualCamera: DualCameraSessionState = DualCameraSessionState(),
-    val lastError: String? = null
+    val statusMessage: String = "",
+    val lastError: String? = null,
+    val localDeviceId: String = "",
+    val webrtcState: String = "NEW"
 )

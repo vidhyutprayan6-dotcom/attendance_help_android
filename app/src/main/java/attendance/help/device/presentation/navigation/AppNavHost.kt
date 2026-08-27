@@ -1,85 +1,112 @@
 package attendance.help.device.presentation.navigation
 
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import attendance.help.device.presentation.connect.ConnectScreen
+import attendance.help.device.presentation.connect.ConnectViewModel
 import attendance.help.device.presentation.home.HomeScreen
 import attendance.help.device.presentation.home.HomeViewModel
-import attendance.help.device.presentation.pairing.PairingScreen
-import attendance.help.device.presentation.pairing.PairingViewModel
-import attendance.help.device.presentation.role.RoleSelectScreen
-import attendance.help.device.presentation.role.RoleSelectViewModel
+import attendance.help.device.presentation.mode.ModeScreen
+import attendance.help.device.presentation.mode.ModeViewModel
+import attendance.help.device.presentation.remotelist.RemoteListScreen
+import attendance.help.device.presentation.remotelist.RemoteListViewModel
 import attendance.help.device.presentation.session.SessionScreen
 import attendance.help.device.presentation.session.SessionViewModel
 import attendance.help.device.presentation.welcome.WelcomeScreen
 
 @Composable
-fun AppNavHost(
-    startDestination: String
-) {
+fun AppNavHost(startDestination: String) {
     val navController = rememberNavController()
 
-    NavHost(
-        navController = navController,
-        startDestination = startDestination
-    ) {
+    NavHost(navController = navController, startDestination = startDestination) {
         composable(Routes.Welcome) {
             WelcomeScreen(
-                onContinue = { navController.navigate(Routes.RoleSelect) }
+                onContinue = {
+                    navController.navigate(Routes.Connect) {
+                        popUpTo(Routes.Welcome) { inclusive = true }
+                    }
+                }
             )
         }
-        composable(Routes.RoleSelect) {
-            val viewModel: RoleSelectViewModel = hiltViewModel()
-            RoleSelectScreen(
-                onRoleConfirmed = {
+        composable(Routes.Connect) {
+            val vm: ConnectViewModel = hiltViewModel()
+            val state by vm.ui.collectAsStateWithLifecycle()
+            ConnectScreen(
+                state = state,
+                onHostChange = vm::onHostChange,
+                onNameChange = vm::onNameChange,
+                onHostLocallyChange = vm::onHostLocallyChange,
+                onConnect = vm::connect,
+                onConnectedNext = {
+                    navController.navigate(Routes.Mode) {
+                        popUpTo(Routes.Connect) { inclusive = false }
+                    }
+                },
+                onGoHome = {
                     navController.navigate(Routes.Home) {
                         popUpTo(Routes.Welcome) { inclusive = true }
                     }
+                }
+            )
+        }
+        composable(Routes.Mode) {
+            val vm: ModeViewModel = hiltViewModel()
+            val state by vm.ui.collectAsStateWithLifecycle()
+            ModeScreen(
+                state = state,
+                onSetRemote = { vm.setRemote() },
+                onSetControl = { vm.setControl() },
+                onSetNothing = { vm.setNothing() },
+                onDone = {
+                    navController.navigate(Routes.Home) {
+                        popUpTo(Routes.Connect) { inclusive = true }
+                    }
                 },
-                viewModel = viewModel
+                onBack = { navController.popBackStack() }
             )
         }
         composable(Routes.Home) {
-            val viewModel: HomeViewModel = hiltViewModel()
-            val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+            val vm: HomeViewModel = hiltViewModel()
+            val state by vm.ui.collectAsStateWithLifecycle()
             HomeScreen(
-                uiState = uiState,
-                onPairing = { navController.navigate(Routes.Pairing) },
+                state = state,
+                onModeSettings = { navController.navigate(Routes.Mode) },
+                onConnectSettings = { navController.navigate(Routes.Connect) },
+                onRemoteList = { navController.navigate(Routes.RemoteList) },
                 onSession = { navController.navigate(Routes.Session) }
             )
         }
-        composable(Routes.Pairing) {
-            val viewModel: PairingViewModel = hiltViewModel()
-            val uiState by viewModel.uiState.collectAsStateWithLifecycle()
-            PairingScreen(
-                uiState = uiState,
-                onStartWaiting = viewModel::startControllerWaiting,
-                onRefreshIp = viewModel::refreshIp,
-                onConnect = viewModel::connectRemote,
-                onBack = { navController.popBackStack() },
-                onGoSession = { navController.navigate(Routes.Session) }
+        composable(Routes.RemoteList) {
+            val vm: RemoteListViewModel = hiltViewModel()
+            val state by vm.ui.collectAsStateWithLifecycle()
+            LaunchedEffect(Unit) { vm.refresh() }
+            RemoteListScreen(
+                state = state,
+                onRefresh = vm::refresh,
+                onSelect = { remote ->
+                    vm.select(remote)
+                    navController.navigate(Routes.Session)
+                },
+                onBack = { navController.popBackStack() }
             )
         }
         composable(Routes.Session) {
-            val viewModel: SessionViewModel = hiltViewModel()
-            val uiState by viewModel.uiState.collectAsStateWithLifecycle()
-            val role by viewModel.role.collectAsStateWithLifecycle()
+            val vm: SessionViewModel = hiltViewModel()
+            val state by vm.ui.collectAsStateWithLifecycle()
             SessionScreen(
-                uiState = uiState,
-                role = role,
-                onBindRenderers = viewModel::bindRenderers,
-                onUnbindRenderers = viewModel::unbindRenderers,
-                onOpenCamera = viewModel::openCameras,
-                onCloseCamera = viewModel::closeCameras,
-                onPing = viewModel::ping,
-                onDisconnect = {
-                    viewModel.disconnect()
-                    navController.popBackStack()
-                },
+                state = state,
+                mode = vm.mode,
+                onBindRenderers = vm::bindRenderers,
+                onUnbindRenderers = vm::unbindRenderers,
+                onOpenCamera = vm::openCameras,
+                onCloseCamera = vm::closeCameras,
+                onPing = vm::ping,
                 onBack = { navController.popBackStack() }
             )
         }

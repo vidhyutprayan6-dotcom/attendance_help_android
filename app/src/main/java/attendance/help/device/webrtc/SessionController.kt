@@ -1,10 +1,8 @@
 package attendance.help.device.webrtc
 
+import android.content.Context
 import attendance.help.device.BuildConfig
 import attendance.help.device.camera.LocalCameraSource
-import attendance.help.device.camera.RemoteVideoSource
-import attendance.help.device.data.local.PeerDao
-import attendance.help.device.data.local.PeerEntity
 import attendance.help.device.device.DeviceIdentityProvider
 import attendance.help.device.device.command.CloseCameraCommand
 import attendance.help.device.device.command.CommandParser
@@ -12,19 +10,19 @@ import attendance.help.device.device.command.CommandTypes
 import attendance.help.device.device.command.OpenCameraCommand
 import attendance.help.device.device.command.PingCommand
 import attendance.help.device.device.command.PongCommand
-import attendance.help.device.device.command.StatusCommand
-import attendance.help.device.domain.model.ConnectionState
-import attendance.help.device.domain.model.DeviceRole
+import attendance.help.device.domain.model.AppLinkSnapshot
+import attendance.help.device.domain.model.DeviceMode
 import attendance.help.device.domain.model.DualCameraSessionState
-import attendance.help.device.domain.model.PeerDevice
+import attendance.help.device.domain.model.HubDevice
+import attendance.help.device.domain.model.ServerLinkState
+import attendance.help.device.domain.model.SessionLinkState
 import attendance.help.device.domain.repository.SessionRepository
-import attendance.help.device.network.NetworkManager
-import attendance.help.device.network.signaling.SignalingClient
-import attendance.help.device.network.signaling.SignalingCodec
-import attendance.help.device.network.signaling.SignalingMessage
-import attendance.help.device.network.signaling.SignalingServer
-import attendance.help.device.utils.PairingCodeGenerator
+import attendance.help.device.network.hub.HubClient
+import attendance.help.device.network.hub.HubMessage
+import attendance.help.device.network.hub.HubServer
+import attendance.help.device.service.LinkStatusService
 import attendance.help.device.utils.TailscaleIpFinder
+import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -43,163 +41,211 @@ import timber.log.Timber
 import javax.inject.Inject
 import javax.inject.Singleton
 
-data class LiveSessionUi(
-    val localIp: String? = null,
-    val pairingCode: String? = null,
-    val connectionState: ConnectionState = ConnectionState.NOT_PAIRED,
-    val peer: PeerDevice? = null,
-    val dualCamera: DualCameraSessionState = DualCameraSessionState(),
-    val statusMessage: String = "",
-    val lastError: String? = null,
-    val webrtcState: String = "NEW"
-)
-
+/**
+ * Server-first link orchestrator:
+ * connect to virtual hub → set mode (Remote/Control/Nothing) →
+ * Control selects Remote → bidirectional dual-camera session.
+ */
 @Singleton
 class SessionController @Inject constructor(
+    @ApplicationContext private val context: Context,
     private val sessionRepository: SessionRepository,
     private val deviceIdentityProvider: DeviceIdentityProvider,
-    private val networkManager: NetworkManager,
     private val peerConnectionManager: PeerConnectionManager,
-    private val localCameraSource: LocalCameraSource,
-    private val remoteVideoSource: RemoteVideoSource,
-    private val peerDao: PeerDao
+    private val localCameraSource: LocalCameraSource
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
-    private val codec = SignalingCodec()
+    private val localDeviceId by lazy { deviceIdentityProvider.getOrCreateDeviceId() }
 
-    private var signalingServer: SignalingServer? = null
-    private var signalingClient: SignalingClient? = null
-    private var role: DeviceRole? = null
-    private var localRenderer: SurfaceViewRenderer? = null
+    private var hubServer: HubServer? = null
+    private var hubClient: HubClient? = null
+    private var peerCreated = false
+    private var boundPeerId: String? = null
+
     private var remoteRenderer: SurfaceViewRenderer? = null
-    private var remoteVideoTrack: VideoTrack? = null
+    private var localPipRenderer: SurfaceViewRenderer? = null
+    private var inboundVideoTrack: VideoTrack? = null
 
-    private val _ui = MutableStateFlow(LiveSessionUi())
-    val uiState: StateFlow<LiveSessionUi> = _ui.asStateFlow()
+    private val _ui = MutableStateFlow(AppLinkSnapshot(localDeviceId = localDeviceId))
+    val uiState: StateFlow<AppLinkSnapshot> = _ui.asStateFlow()
 
-    private val localDeviceId: String by lazy { deviceIdentityProvider.getOrCreateDeviceId() }
-
-    fun bindRenderers(local: SurfaceViewRenderer?, remote: SurfaceViewRenderer?) {
-        localRenderer = local
+    fun bindRenderers(remote: SurfaceViewRenderer?, localPip: SurfaceViewRenderer?) {
         remoteRenderer = remote
-        local?.let {
-            peerConnectionManager.initLocalRenderer(it)
-            if (role == DeviceRole.CONTROLLER && peerConnectionManager.isCameraRunning()) {
-                peerConnectionManager.attachLocalVideoTo(it)
-            }
-        }
+        localPipRenderer = localPip
         remote?.let {
             peerConnectionManager.initRemoteRenderer(it)
-            remoteVideoTrack?.addSink(it)
+            inboundVideoTrack?.addSink(it)
+        }
+        localPip?.let {
+            peerConnectionManager.initLocalRenderer(it)
+            if (peerConnectionManager.isCameraRunning()) {
+                peerConnectionManager.attachLocalVideoTo(it)
+            }
         }
     }
 
     fun unbindRenderers() {
-        localRenderer?.let { peerConnectionManager.detachLocalVideoFrom(it) }
-        remoteVideoTrack?.let { track ->
-            remoteRenderer?.let { track.removeSink(it) }
-        }
-        localRenderer = null
+        remoteRenderer?.let { r -> inboundVideoTrack?.removeSink(r) }
+        localPipRenderer?.let { peerConnectionManager.detachLocalVideoFrom(it) }
         remoteRenderer = null
+        localPipRenderer = null
     }
 
-    suspend fun prepareAsController() {
-        role = DeviceRole.CONTROLLER
-        val ip = TailscaleIpFinder.findPreferredIp()
-        val code = sessionRepository.pairingCode.first() ?: PairingCodeGenerator.generate6Digit()
-        sessionRepository.setPairingCode(code)
-        sessionRepository.setConnectionState(ConnectionState.WAITING_FOR_PEER)
-        _ui.value = _ui.value.copy(
-            localIp = ip,
-            pairingCode = code,
-            connectionState = ConnectionState.WAITING_FOR_PEER,
-            statusMessage = "Waiting for Remote to connect…"
-        )
-        startSignalingServer(code)
+    /** Connect to virtual server. Optionally host hub on this phone. */
+    suspend fun connectToServer(hostInput: String, hostLocally: Boolean, displayName: String) {
+        sessionRepository.setDisplayName(displayName.ifBlank { "Phone" })
+        sessionRepository.setHostingHubLocally(hostLocally)
+        sessionRepository.setServerLinkState(ServerLinkState.CONNECTING)
+        update {
+            copy(
+                hostingHubLocally = hostLocally,
+                serverLinkState = ServerLinkState.CONNECTING,
+                statusMessage = "Connecting to server…",
+                lastError = null
+            )
+        }
+
+        val advertiseHost: String
+        val connectHost: String
+        if (hostLocally) {
+            startLocalHub()
+            advertiseHost = withContext(Dispatchers.IO) {
+                TailscaleIpFinder.findPreferredIp() ?: "127.0.0.1"
+            }
+            // Always loop back locally when this phone hosts the hub.
+            connectHost = "127.0.0.1"
+        } else {
+            advertiseHost = hostInput.trim()
+            connectHost = advertiseHost
+        }
+        if (advertiseHost.isBlank() || connectHost.isBlank()) {
+            failServer("Enter a server IP, or host the virtual server on this phone.")
+            return
+        }
+        sessionRepository.setServerHost(advertiseHost)
+        update { copy(serverHost = advertiseHost) }
+        openHubClient(connectHost)
     }
 
-    suspend fun connectAsRemote(controllerIp: String, pairingCode: String) {
-        role = DeviceRole.REMOTE
-        sessionRepository.setConnectionState(ConnectionState.CONNECTING)
-        _ui.value = _ui.value.copy(
-            connectionState = ConnectionState.CONNECTING,
-            statusMessage = "Connecting to $controllerIp…",
-            lastError = null
+    suspend fun setMode(mode: DeviceMode) {
+        if (_ui.value.serverLinkState != ServerLinkState.CONNECTED &&
+            _ui.value.serverLinkState != ServerLinkState.HOSTING_AND_CONNECTED
+        ) {
+            failServer("Connect to the server first.")
+            return
+        }
+        if (mode == DeviceMode.NONE) {
+            clearModeToNothing()
+            return
+        }
+        sessionRepository.setDeviceMode(mode)
+        val name = sessionRepository.displayName.first()
+        hubClient?.send(
+            HubMessage.Register(
+                deviceId = localDeviceId,
+                displayName = name,
+                mode = mode.name
+            )
         )
-        val client = SignalingClient(
-            codec = codec,
-            onMessage = { handleSignaling(it) },
-            onOpen = {
-                scope.launch {
-                    sessionRepository.setConnectionState(ConnectionState.PAIRING)
-                    clientSend(
-                        SignalingMessage.Hello(
-                            deviceId = localDeviceId,
-                            role = DeviceRole.REMOTE.name,
-                            pairingCode = pairingCode,
-                            displayName = "Remote"
-                        )
-                    )
-                }
-            },
-            onClosed = { reason ->
-                scope.launch {
-                    sessionRepository.setConnectionState(ConnectionState.PAIRED_DISCONNECTED)
-                    updateUi {
-                        copy(
-                            connectionState = ConnectionState.PAIRED_DISCONNECTED,
-                            statusMessage = "Disconnected: $reason"
-                        )
-                    }
-                }
-            },
-            onFailure = { error ->
-                scope.launch {
-                    sessionRepository.setConnectionState(ConnectionState.ERROR)
-                    sessionRepository.setLastError(error.message)
-                    updateUi {
-                        copy(
-                            connectionState = ConnectionState.ERROR,
-                            lastError = error.message ?: "Connection failed",
-                            statusMessage = "Connection failed"
-                        )
-                    }
-                }
+        val sessionState = if (mode == DeviceMode.REMOTE) {
+            SessionLinkState.WAITING_FOR_CONTROL
+        } else {
+            SessionLinkState.SELECTING_REMOTE
+        }
+        sessionRepository.setSessionLinkState(sessionState)
+        update {
+            copy(
+                mode = mode,
+                sessionLinkState = sessionState,
+                statusMessage = when (mode) {
+                    DeviceMode.REMOTE -> "Remote mode — controllable by any Control phone"
+                    DeviceMode.CONTROL -> "Control mode — select a Remote phone"
+                    else -> ""
+                },
+                boundPeer = null
+            )
+        }
+        refreshStatusNotification(
+            detail = when (mode) {
+                DeviceMode.REMOTE -> "Controllable by any phone"
+                DeviceMode.CONTROL -> "Select a remote to control"
+                else -> ""
             }
         )
-        signalingClient = client
-        client.connect(networkManager.signalingWsUrl(controllerIp.trim()))
+        if (mode == DeviceMode.CONTROL) {
+            hubClient?.send(HubMessage.RequestRemotes(localDeviceId))
+        }
+    }
+
+    /** "Set nothing" — return to mode-unset while keeping server link. */
+    suspend fun clearModeToNothing() {
+        hubClient?.send(HubMessage.Unregister(localDeviceId))
+        stopMediaFully()
+        boundPeerId = null
+        sessionRepository.clearModeSettings()
+        LinkStatusService.stop(context)
+        update {
+            copy(
+                mode = DeviceMode.NONE,
+                sessionLinkState = SessionLinkState.IDLE,
+                boundPeer = null,
+                availableRemotes = emptyList(),
+                dualCamera = DualCameraSessionState(),
+                statusMessage = "Mode cleared — phone is in initial (nothing) state",
+                webrtcState = "CLOSED"
+            )
+        }
+    }
+
+    fun refreshRemoteList() {
+        hubClient?.send(HubMessage.RequestRemotes(localDeviceId))
+    }
+
+    fun selectRemote(remote: HubDevice) {
+        if (_ui.value.mode != DeviceMode.CONTROL) return
+        update { copy(sessionLinkState = SessionLinkState.BINDING, statusMessage = "Binding to ${remote.displayName}…") }
+        hubClient?.send(
+            HubMessage.SelectRemote(
+                controlDeviceId = localDeviceId,
+                remoteDeviceId = remote.deviceId
+            )
+        )
     }
 
     fun openDualCamera() {
+        val peerId = boundPeerId ?: return
+        if (_ui.value.mode != DeviceMode.CONTROL) {
+            update { copy(statusMessage = "Only Control phone starts the dual-camera session") }
+            return
+        }
         scope.launch {
-            if (role != DeviceRole.CONTROLLER) {
-                updateUi { copy(statusMessage = "Only Controller can start dual camera") }
-                return@launch
-            }
-            ensurePeerForMedia(isController = true)
-            startDualCameraLocally()
-            serverOrClientSend(SignalingMessage.CameraStart(localDeviceId))
+            ensurePeer(isOfferer = true)
+            startBothCamerasLocally()
+            hubClient?.send(HubMessage.CameraStart(fromId = localDeviceId, toId = peerId))
             peerConnectionManager.sendData(OpenCameraCommand(localDeviceId).toPayload())
             peerConnectionManager.createOffer(
                 onSuccess = { sdp ->
-                    serverOrClientSend(SignalingMessage.Offer(sdp.description))
+                    hubClient?.send(
+                        HubMessage.RelayOffer(
+                            fromId = localDeviceId,
+                            toId = peerId,
+                            sdp = sdp.description
+                        )
+                    )
                 },
-                onError = { err ->
-                    scope.launch {
-                        sessionRepository.setLastError(err)
-                        updateUi { copy(lastError = err) }
-                    }
-                }
+                onError = { err -> scope.launch { sessionRepository.setLastError(err) } }
             )
         }
     }
 
     fun closeDualCamera() {
+        val peerId = boundPeerId
         scope.launch {
-            serverOrClientSend(SignalingMessage.CameraStop(localDeviceId))
-            peerConnectionManager.sendData(CloseCameraCommand(localDeviceId).toPayload())
-            stopDualCameraLocally()
+            if (peerId != null) {
+                hubClient?.send(HubMessage.CameraStop(fromId = localDeviceId, toId = peerId))
+                peerConnectionManager.sendData(CloseCameraCommand(localDeviceId).toPayload())
+            }
+            stopBothCamerasLocally()
             peerConnectionManager.release()
             peerCreated = false
         }
@@ -209,227 +255,196 @@ class SessionController @Inject constructor(
         peerConnectionManager.sendData(PingCommand(localDeviceId).toPayload())
     }
 
-    suspend fun disconnect() {
-        serverOrClientSend(SignalingMessage.Hangup())
-        stopDualCameraLocally()
-        signalingClient?.disconnect()
-        signalingClient = null
-        runCatching { signalingServer?.stop() }
-        signalingServer = null
-        peerConnectionManager.release()
-        peerCreated = false
-        sessionRepository.setConnectionState(ConnectionState.PAIRED_DISCONNECTED)
-        updateUi {
+    suspend fun disconnectServer() {
+        clearModeToNothing()
+        hubClient?.disconnect()
+        hubClient = null
+        runCatching { hubServer?.stop() }
+        hubServer = null
+        sessionRepository.setServerLinkState(ServerLinkState.DISCONNECTED)
+        LinkStatusService.stop(context)
+        update {
             copy(
-                connectionState = ConnectionState.PAIRED_DISCONNECTED,
-                dualCamera = DualCameraSessionState(),
-                statusMessage = "Disconnected",
-                webrtcState = "CLOSED"
+                serverLinkState = ServerLinkState.DISCONNECTED,
+                statusMessage = "Disconnected from server"
             )
         }
     }
 
-    private fun startSignalingServer(expectedCode: String) {
-        runCatching { signalingServer?.stop() }
-        val server = SignalingServer(
-            port = BuildConfig.SIGNALING_PORT,
-            codec = codec,
-            onMessage = { handleSignaling(it) },
-            onClientConnected = {
-                scope.launch {
-                    updateUi { copy(statusMessage = "Remote socket connected — verifying…") }
-                }
+    private suspend fun startLocalHub() = withContext(Dispatchers.IO) {
+        runCatching { hubServer?.stop() }
+        val server = HubServer(BuildConfig.SIGNALING_PORT)
+        hubServer = server
+        // start() blocks; run on dedicated thread.
+        Thread(
+            {
+                runCatching { server.start() }
+                    .onFailure { Timber.e(it, "Hub start failed") }
             },
-            onClientDisconnected = {
-                scope.launch {
-                    sessionRepository.setConnectionState(ConnectionState.PAIRED_DISCONNECTED)
-                    updateUi {
-                        copy(
-                            connectionState = ConnectionState.PAIRED_DISCONNECTED,
-                            statusMessage = "Remote disconnected"
-                        )
-                    }
-                }
-            },
-            expectedPairingCode = { expectedCode }
-        )
-        signalingServer = server
-        Thread {
-            runCatching { server.start() }
-                .onFailure { Timber.e(it, "Failed to start signaling server") }
-        }.start()
+            "ah-hub-server"
+        ).start()
+        Thread.sleep(500)
     }
 
-    private fun handleSignaling(message: SignalingMessage) {
+    private fun openHubClient(host: String) {
+        hubClient?.disconnect()
+        val client = HubClient(
+            onMessage = { handleHub(it) },
+            onOpen = {
+                scope.launch {
+                    val hosting = sessionRepository.hostingHubLocally.first()
+                    val state = if (hosting) {
+                        ServerLinkState.HOSTING_AND_CONNECTED
+                    } else {
+                        ServerLinkState.CONNECTED
+                    }
+                    sessionRepository.setServerLinkState(state)
+                    update {
+                        copy(
+                            serverLinkState = state,
+                            statusMessage = "Connected to server $host — set phone mode next"
+                        )
+                    }
+                    // Re-register if mode already persisted (app relaunch).
+                    val mode = sessionRepository.deviceMode.first()
+                    if (mode != DeviceMode.NONE) {
+                        setMode(mode)
+                    } else {
+                        refreshStatusNotification(detail = "Choose Remote / Control / Nothing")
+                    }
+                }
+            },
+            onClosed = {
+                scope.launch {
+                    sessionRepository.setServerLinkState(ServerLinkState.DISCONNECTED)
+                    update {
+                        copy(
+                            serverLinkState = ServerLinkState.DISCONNECTED,
+                            statusMessage = "Server connection closed"
+                        )
+                    }
+                }
+            },
+            onFailure = { t ->
+                scope.launch { failServer(t.message ?: "Server connection failed") }
+            }
+        )
+        hubClient = client
+        client.connect("ws://$host:${BuildConfig.SIGNALING_PORT}")
+    }
+
+    private fun handleHub(message: HubMessage) {
         scope.launch {
             when (message) {
-                is SignalingMessage.Hello -> {
-                    if (role != DeviceRole.CONTROLLER) return@launch
-                    val peer = PeerDevice(
-                        deviceId = message.deviceId,
-                        displayName = message.displayName,
-                        tailscaleIp = "remote",
-                        lastConnectedAtEpochMs = System.currentTimeMillis()
-                    )
-                    sessionRepository.setPeerDevice(peer)
-                    peerDao.upsert(
-                        PeerEntity(
-                            deviceId = peer.deviceId,
-                            displayName = peer.displayName,
-                            tailscaleIp = peer.tailscaleIp,
-                            lastConnectedAtEpochMs = peer.lastConnectedAtEpochMs ?: 0L
-                        )
-                    )
-                    serverOrClientSend(
-                        SignalingMessage.Welcome(
-                            deviceId = localDeviceId,
-                            role = DeviceRole.CONTROLLER.name,
-                            displayName = "Controller"
-                        )
-                    )
-                    sessionRepository.setConnectionState(ConnectionState.CONNECTED)
-                    updateUi {
-                        copy(
-                            peer = peer,
-                            connectionState = ConnectionState.CONNECTED,
-                            statusMessage = "Paired with Remote"
-                        )
-                    }
-                    ensurePeerForMedia(isController = true)
+                is HubMessage.RegisterAck -> {
+                    update { copy(statusMessage = message.message.ifBlank { "Registered" }) }
                 }
-
-                is SignalingMessage.Welcome -> {
-                    if (role != DeviceRole.REMOTE) return@launch
-                    val peer = PeerDevice(
-                        deviceId = message.deviceId,
-                        displayName = message.displayName,
-                        tailscaleIp = _ui.value.localIp ?: "",
-                        lastConnectedAtEpochMs = System.currentTimeMillis()
-                    )
-                    // Preserve controller IP from connect form via status message / separate field
-                    sessionRepository.setPeerDevice(
-                        peer.copy(tailscaleIp = peer.tailscaleIp.ifBlank { "controller" })
-                    )
-                    sessionRepository.setConnectionState(ConnectionState.CONNECTED)
-                    updateUi {
+                is HubMessage.RemotesList -> {
+                    update {
                         copy(
-                            peer = peer,
-                            connectionState = ConnectionState.CONNECTED,
-                            statusMessage = "Paired with Controller"
-                        )
-                    }
-                    ensurePeerForMedia(isController = false)
-                }
-
-                is SignalingMessage.Reject -> {
-                    sessionRepository.setConnectionState(ConnectionState.ERROR)
-                    sessionRepository.setLastError(message.reason)
-                    updateUi {
-                        copy(
-                            connectionState = ConnectionState.ERROR,
-                            lastError = message.reason,
-                            statusMessage = "Pairing rejected"
+                            availableRemotes = message.remotes,
+                            statusMessage = "Remotes online: ${message.remotes.size}"
                         )
                     }
                 }
-
-                is SignalingMessage.Offer -> {
-                    ensurePeerForMedia(isController = role == DeviceRole.CONTROLLER)
-                    // Ensure remote camera is on when offer arrives (both cameras together).
-                    if (role == DeviceRole.REMOTE && !peerConnectionManager.isCameraRunning()) {
-                        startDualCameraLocally()
+                is HubMessage.SessionBound -> {
+                    val iAmControl = message.controlDeviceId == localDeviceId
+                    val peer = if (iAmControl) {
+                        HubDevice(message.remoteDeviceId, message.remoteName, DeviceMode.REMOTE, false)
+                    } else {
+                        HubDevice(message.controlDeviceId, message.controlName, DeviceMode.CONTROL, false)
+                    }
+                    boundPeerId = peer.deviceId
+                    sessionRepository.setSessionLinkState(SessionLinkState.BOUND)
+                    update {
+                        copy(
+                            boundPeer = peer,
+                            sessionLinkState = SessionLinkState.BOUND,
+                            statusMessage = "Phones combined — bound with ${peer.displayName}"
+                        )
+                    }
+                    refreshStatusNotification(detail = "Bound with ${peer.displayName}")
+                    ensurePeer(isOfferer = iAmControl)
+                }
+                is HubMessage.RelayOffer -> {
+                    ensurePeer(isOfferer = false)
+                    if (!peerConnectionManager.isCameraRunning()) {
+                        startBothCamerasLocally()
                     }
                     peerConnectionManager.setRemoteDescription(
                         SessionDescription(SessionDescription.Type.OFFER, message.sdp)
                     ) {
                         peerConnectionManager.createAnswer(
                             onSuccess = { answer ->
-                                serverOrClientSend(SignalingMessage.Answer(answer.description))
+                                hubClient?.send(
+                                    HubMessage.RelayAnswer(
+                                        fromId = localDeviceId,
+                                        toId = message.fromId,
+                                        sdp = answer.description
+                                    )
+                                )
                             },
                             onError = { Timber.e(it) }
                         )
                     }
                 }
-
-                is SignalingMessage.Answer -> {
+                is HubMessage.RelayAnswer -> {
                     peerConnectionManager.setRemoteDescription(
                         SessionDescription(SessionDescription.Type.ANSWER, message.sdp)
                     )
                 }
-
-                is SignalingMessage.Ice -> {
+                is HubMessage.RelayIce -> {
                     peerConnectionManager.addIceCandidate(
                         IceCandidate(message.sdpMid, message.sdpMLineIndex ?: 0, message.candidate)
                     )
                 }
-
-                is SignalingMessage.Hangup -> {
-                    stopDualCameraLocally()
-                    sessionRepository.setConnectionState(ConnectionState.PAIRED_DISCONNECTED)
-                    updateUi {
-                        copy(
-                            connectionState = ConnectionState.PAIRED_DISCONNECTED,
-                            statusMessage = "Peer hung up"
-                        )
-                    }
+                is HubMessage.CameraStart -> {
+                    ensurePeer(isOfferer = false)
+                    startBothCamerasLocally()
                 }
-
-                is SignalingMessage.CameraStart -> {
-                    ensurePeerForMedia(isController = role == DeviceRole.CONTROLLER)
-                    startDualCameraLocally()
-                }
-
-                is SignalingMessage.CameraStop -> {
-                    stopDualCameraLocally()
+                is HubMessage.CameraStop -> {
+                    stopBothCamerasLocally()
                     peerConnectionManager.release()
                     peerCreated = false
                 }
+                is HubMessage.ErrorMsg -> {
+                    sessionRepository.setLastError(message.message)
+                    update { copy(lastError = message.message, statusMessage = message.message) }
+                }
+                else -> Unit
             }
         }
     }
 
-    private var peerCreated = false
-
-    private fun ensurePeerForMedia(isController: Boolean) {
-        if (peerCreated) {
-            // Refresh listeners only.
-        }
+    private fun ensurePeer(isOfferer: Boolean) {
         peerConnectionManager.createPeerConnection(
-            isController = isController,
+            isController = isOfferer,
             listeners = WebRtcListeners(
-                onIceCandidate = { candidate ->
-                    serverOrClientSend(
-                        SignalingMessage.Ice(
-                            candidate = candidate.sdp,
-                            sdpMid = candidate.sdpMid,
-                            sdpMLineIndex = candidate.sdpMLineIndex
+                onIceCandidate = { c ->
+                    val peerId = boundPeerId ?: return@WebRtcListeners
+                    hubClient?.send(
+                        HubMessage.RelayIce(
+                            fromId = localDeviceId,
+                            toId = peerId,
+                            candidate = c.sdp,
+                            sdpMid = c.sdpMid,
+                            sdpMLineIndex = c.sdpMLineIndex
                         )
                     )
                 },
                 onConnectionChange = { state ->
                     scope.launch {
-                        updateUi { copy(webrtcState = state.name) }
+                        update { copy(webrtcState = state.name) }
                         if (state == PeerConnection.PeerConnectionState.CONNECTED) {
-                            sessionRepository.setConnectionState(ConnectionState.CONNECTED)
-                        }
-                        if (state == PeerConnection.PeerConnectionState.FAILED ||
-                            state == PeerConnection.PeerConnectionState.DISCONNECTED
-                        ) {
-                            sessionRepository.setConnectionState(ConnectionState.RECONNECTING)
-                            updateUi {
-                                copy(
-                                    connectionState = ConnectionState.RECONNECTING,
-                                    statusMessage = "WebRTC $state — check Tailscale"
-                                )
-                            }
+                            sessionRepository.setSessionLinkState(SessionLinkState.STREAMING)
+                            update { copy(sessionLinkState = SessionLinkState.STREAMING) }
                         }
                     }
                 },
-                onDataMessage = { payload -> handleDataCommand(payload) },
+                onDataMessage = { handleData(it) },
                 onRemoteVideoTrack = { track ->
                     scope.launch {
-                        remoteVideoTrack = track
-                        remoteVideoSource.start()
+                        inboundVideoTrack = track
                         remoteRenderer?.let { track.addSink(it) }
                     }
                 }
@@ -438,66 +453,47 @@ class SessionController @Inject constructor(
         peerCreated = true
     }
 
-    private fun handleDataCommand(payload: String) {
+    private fun handleData(payload: String) {
         scope.launch {
             when (CommandParser.typeOf(payload)) {
-                CommandTypes.OPEN_CAMERA -> {
-                    startDualCameraLocally()
-                    if (role == DeviceRole.REMOTE) {
-                        // Remote answers after starting camera if offer already set; if controller
-                        // already sent offer, tracks may renegotiate — send status back.
-                        peerConnectionManager.sendData(
-                            StatusCommand(localDeviceId, cameraOn = true, role = role!!.name).toPayload()
-                        )
-                    }
-                }
-                CommandTypes.CLOSE_CAMERA -> stopDualCameraLocally()
-                CommandTypes.PING -> {
+                CommandTypes.OPEN_CAMERA -> startBothCamerasLocally()
+                CommandTypes.CLOSE_CAMERA -> stopBothCamerasLocally()
+                CommandTypes.PING ->
                     peerConnectionManager.sendData(PongCommand(localDeviceId).toPayload())
-                }
-                CommandTypes.PONG -> {
-                    updateUi { copy(statusMessage = "Peer alive (PONG)") }
-                }
-                CommandTypes.DEVICE_STATUS -> {
-                    updateUi { copy(statusMessage = "Peer status received") }
-                }
+                CommandTypes.PONG -> update { copy(statusMessage = "Peer alive (PONG)") }
             }
         }
     }
 
-    private suspend fun startDualCameraLocally() {
+    private suspend fun startBothCamerasLocally() {
         withContext(Dispatchers.Main) {
             localCameraSource.start()
-            if (role == DeviceRole.CONTROLLER) {
-                localRenderer?.let { peerConnectionManager.attachLocalVideoTo(it) }
-            }
-            // Remote also starts camera (product rule: both on), but UI shows controller stream.
+            localPipRenderer?.let { peerConnectionManager.attachLocalVideoTo(it) }
             val dual = DualCameraSessionState(
                 isActive = true,
-                controllerCameraOn = true,
-                remoteCameraOn = true,
-                controllerShowsLocalPreview = true,
-                remoteShowsControllerStream = true
+                bothCamerasOn = true,
+                controlShowsRemoteFeed = true,
+                remoteShowsControlFeed = true
             )
-            updateUi {
+            update {
                 copy(
                     dualCamera = dual,
-                    statusMessage = if (role == DeviceRole.CONTROLLER) {
-                        "Dual camera ON — showing your camera"
-                    } else {
-                        "Dual camera ON — showing controller camera"
+                    sessionLinkState = SessionLinkState.STREAMING,
+                    statusMessage = when (mode) {
+                        DeviceMode.CONTROL -> "Cameras ON — showing Remote video (your camera also on)"
+                        DeviceMode.REMOTE -> "Cameras ON — showing Control video (your camera also on)"
+                        else -> "Cameras ON"
                     }
                 )
             }
         }
     }
 
-    private suspend fun stopDualCameraLocally() {
+    private suspend fun stopBothCamerasLocally() {
         withContext(Dispatchers.Main) {
-            localRenderer?.let { peerConnectionManager.detachLocalVideoFrom(it) }
+            localPipRenderer?.let { peerConnectionManager.detachLocalVideoFrom(it) }
             localCameraSource.stop()
-            remoteVideoSource.stop()
-            updateUi {
+            update {
                 copy(
                     dualCamera = DualCameraSessionState(),
                     statusMessage = "Cameras stopped"
@@ -506,16 +502,65 @@ class SessionController @Inject constructor(
         }
     }
 
-    private fun serverOrClientSend(message: SignalingMessage) {
-        signalingServer?.send(message)
-        signalingClient?.send(message)
+    private suspend fun stopMediaFully() {
+        stopBothCamerasLocally()
+        peerConnectionManager.release()
+        peerCreated = false
+        inboundVideoTrack = null
     }
 
-    private fun clientSend(message: SignalingMessage) {
-        signalingClient?.send(message)
+    private suspend fun failServer(message: String) {
+        sessionRepository.setServerLinkState(ServerLinkState.ERROR)
+        sessionRepository.setLastError(message)
+        update {
+            copy(
+                serverLinkState = ServerLinkState.ERROR,
+                lastError = message,
+                statusMessage = message
+            )
+        }
     }
 
-    private fun updateUi(block: LiveSessionUi.() -> LiveSessionUi) {
+    private fun refreshStatusNotification(detail: String) {
+        val snap = _ui.value
+        if (snap.serverLinkState == ServerLinkState.DISCONNECTED) {
+            LinkStatusService.stop(context)
+            return
+        }
+        LinkStatusService.update(
+            context = context,
+            mode = snap.mode,
+            server = snap.serverHost.ifBlank { "server" },
+            detail = detail
+        )
+    }
+
+    private fun update(block: AppLinkSnapshot.() -> AppLinkSnapshot) {
         _ui.value = _ui.value.block()
+    }
+
+    /** Restore notification / reconnect after process start if needed. */
+    fun restoreStatusBarIfNeeded() {
+        scope.launch {
+            val mode = sessionRepository.deviceMode.first()
+            val link = sessionRepository.serverLinkState.first()
+            val host = sessionRepository.serverHost.first()
+            if (link == ServerLinkState.CONNECTED || link == ServerLinkState.HOSTING_AND_CONNECTED) {
+                update {
+                    copy(
+                        mode = mode,
+                        serverHost = host,
+                        serverLinkState = link
+                    )
+                }
+                refreshStatusNotification(
+                    detail = when (mode) {
+                        DeviceMode.REMOTE -> "Controllable by any phone"
+                        DeviceMode.CONTROL -> "Control phone"
+                        DeviceMode.NONE -> "Connected — set mode"
+                    }
+                )
+            }
+        }
     }
 }

@@ -1,4 +1,4 @@
-package attendance.help.device.presentation.session
+package attendance.help.device.presentation.mode
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -9,28 +9,20 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.stateIn
-import org.webrtc.SurfaceViewRenderer
+import kotlinx.coroutines.launch
 import javax.inject.Inject
 
 @HiltViewModel
-class SessionViewModel @Inject constructor(
+class ModeViewModel @Inject constructor(
     private val sessionController: SessionController
 ) : ViewModel() {
-
     val ui: StateFlow<AppLinkSnapshot> = sessionController.uiState.stateIn(
         viewModelScope,
         SharingStarted.WhileSubscribed(5_000),
         AppLinkSnapshot()
     )
 
-    val mode: DeviceMode get() = ui.value.mode
-
-    fun bindRenderers(remote: SurfaceViewRenderer?, localPip: SurfaceViewRenderer?) {
-        sessionController.bindRenderers(remote, localPip)
-    }
-
-    fun unbindRenderers() = sessionController.unbindRenderers()
-    fun openCameras() = sessionController.openDualCamera()
-    fun closeCameras() = sessionController.closeDualCamera()
-    fun ping() = sessionController.sendPing()
+    fun setRemote() = viewModelScope.launch { sessionController.setMode(DeviceMode.REMOTE) }
+    fun setControl() = viewModelScope.launch { sessionController.setMode(DeviceMode.CONTROL) }
+    fun setNothing() = viewModelScope.launch { sessionController.clearModeToNothing() }
 }

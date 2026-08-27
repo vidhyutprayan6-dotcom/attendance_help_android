@@ -1,43 +1,72 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Attendance Help</string>
+
     <string name="welcome_title">Attendance Help</string>
-    <string name="welcome_subtitle">Link two phones. Control them as one.</string>
-    <string name="choose_language">Choose language</string>
+    <string name="welcome_subtitle">Connect to the virtual server, then set this phone as Remote or Control.</string>
+    <string name="choose_language">Language</string>
     <string name="language_english">English</string>
     <string name="language_arabic">العربية</string>
-    <string name="choose_role_title">Choose this phone\'s role</string>
-    <string name="role_controller">Controller</string>
-    <string name="role_controller_desc">Phone you hold. Starts cameras and sends commands. Shows your own camera.</string>
-    <string name="role_remote">Remote</string>
-    <string name="role_remote_desc">Other phone. Follows commands. Shows the controller\'s face.</string>
     <string name="continue_action">Continue</string>
-    <string name="home_title">Control center</string>
-    <string name="connection_status_label">Connection</string>
-    <string name="pairing_title">Pair devices</string>
-    <string name="pairing_controller_hint">Share this Tailscale IP and code with the Remote phone.</string>
-    <string name="pairing_remote_hint">Enter the Controller Tailscale IP and pairing code.</string>
-    <string name="your_ip_label">This phone IP</string>
-    <string name="pairing_code_label">Pairing code</string>
-    <string name="controller_ip_label">Controller Tailscale IP</string>
-    <string name="start_waiting">Start waiting</string>
-    <string name="connect_to_controller">Connect</string>
-    <string name="open_camera">Open cameras</string>
-    <string name="close_camera">Close cameras</string>
-    <string name="send_ping">Ping peer</string>
-    <string name="disconnect">Disconnect</string>
-    <string name="session_title">Live session</string>
-    <string name="permission_camera_required">Camera and microphone permissions are required for the dual-camera session.</string>
-    <string name="grant_permissions">Grant permissions</string>
-    <string name="display_rule_controller">Controller screen: your own live camera</string>
-    <string name="display_rule_remote">Remote screen: controller\'s live camera</string>
-    <string name="not_paired">Not paired</string>
-    <string name="waiting_peer">Waiting for peer</string>
-    <string name="connected">Connected</string>
-    <string name="ip_missing">No IP found. Connect Tailscale, then tap refresh.</string>
-    <string name="refresh_ip">Refresh IP</string>
-    <string name="go_session">Open live session</string>
-    <string name="device_id_label">Device ID</string>
-    <string name="ready_banner">Ready — pair over Tailscale, then open dual cameras</string>
     <string name="back_action">Back</string>
+
+    <string name="connect_title">1. Connect to server</string>
+    <string name="connect_hint">Enter the virtual server IP (Tailscale or LAN), or host the server on this phone.</string>
+    <string name="server_ip_label">Server IP</string>
+    <string name="phone_name_label">This phone name</string>
+    <string name="host_server_here">Host virtual server on this phone</string>
+    <string name="connect_action">Connect to server</string>
+    <string name="disconnect_server">Disconnect server</string>
+    <string name="server_connected">Server: Connected</string>
+    <string name="server_disconnected">Server: Not connected</string>
+    <string name="your_hosted_ip">Hosted server IP</string>
+
+    <string name="mode_title">2. Phone mode</string>
+    <string name="mode_hint">Choose how this phone works. Status stays in the system bar until you clear it.</string>
+    <string name="mode_remote">Set as Remote phone</string>
+    <string name="mode_remote_desc">This phone can be controlled by any Control phone. Remains available on the server.</string>
+    <string name="mode_control">Set as Control phone</string>
+    <string name="mode_control_desc">This phone controls a Remote. Pick a device from the list after setting.</string>
+    <string name="mode_nothing">Set nothing (clear)</string>
+    <string name="mode_nothing_desc">Return to the initial state. Enabled only after a mode is set.</string>
+    <string name="mode_current">Current mode</string>
+    <string name="mode_none_label">Nothing (not set)</string>
+    <string name="mode_remote_label">Remote</string>
+    <string name="mode_control_label">Control</string>
+
+    <string name="home_title">Attendance Help</string>
+    <string name="status_section">Status</string>
+    <string name="actions_section">Actions</string>
+    <string name="open_mode_settings">Mode settings</string>
+    <string name="open_remote_list">Choose Remote to control</string>
+    <string name="open_live_session">Live camera session</string>
+    <string name="waiting_as_remote">Waiting as Remote — controllable by any Control phone</string>
+    <string name="device_id_label">Device ID</string>
+
+    <string name="remote_list_title">Remotes you can control</string>
+    <string name="remote_list_empty">No Remote phones online yet.</string>
+    <string name="remote_available">Available</string>
+    <string name="remote_busy">Busy</string>
+    <string name="select_remote">Control this phone</string>
+    <string name="refresh_list">Refresh list</string>
+
+    <string name="session_title">Live session</string>
+    <string name="session_main_feed">Peer camera (main)</string>
+    <string name="session_local_pip">Your camera (also on)</string>
+    <string name="open_camera">Start cameras (both phones)</string>
+    <string name="close_camera">Stop cameras</string>
+    <string name="send_ping">Ping</string>
+    <string name="unbind_session">Leave bound session</string>
+    <string name="permission_camera_required">Camera and microphone are required.</string>
+    <string name="grant_permissions">Grant permissions</string>
+    <string name="display_rule">Both cameras ON together. Control sees Remote video. Remote sees Control video.</string>
+
+    <string name="notif_channel_name">Link status</string>
+    <string name="notif_channel_desc">Shows server connection and phone mode in the status bar</string>
+    <string name="notif_remote_title">Remote phone — connected</string>
+    <string name="notif_remote_text">Server %1$s · Controllable by any Control phone</string>
+    <string name="notif_control_title">Control phone — connected</string>
+    <string name="notif_control_text">Server %1$s · Ready to control a Remote</string>
+    <string name="notif_server_title">Connected to server</string>
+    <string name="notif_server_text">Server %1$s · Mode not set</string>
 </resources>

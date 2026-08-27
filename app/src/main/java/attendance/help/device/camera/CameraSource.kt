@@ -1,10 +1,10 @@
 package attendance.help.device.camera
 
 /**
- * Swappable video source so Local vs Remote rendering stays decoupled.
+ * Abstraction so video sources can be swapped without changing UI / session logic.
  */
 interface CameraSource {
+    val isRunning: Boolean
     suspend fun start()
     suspend fun stop()
-    val isRunning: Boolean
 }

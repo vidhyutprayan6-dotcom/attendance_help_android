@@ -9,8 +9,7 @@ import javax.inject.Singleton
 @Module
 @InstallIn(SingletonComponent::class)
 abstract class NetworkModule {
-
     @Binds
     @Singleton
-    abstract fun bindNetworkManager(impl: PlaceholderNetworkManager): NetworkManager
+    abstract fun bindNetworkManager(impl: TailscaleNetworkManager): NetworkManager
 }

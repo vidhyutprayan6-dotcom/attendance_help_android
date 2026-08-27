@@ -1,15 +1,12 @@
 package attendance.help.device.di
 
-import android.content.Context
-import attendance.help.device.device.DeviceIdentityProvider
 import attendance.help.device.device.DefaultDeviceIdentityProvider
+import attendance.help.device.device.DeviceIdentityProvider
 import attendance.help.device.utils.AppDispatchers
 import attendance.help.device.utils.DefaultAppDispatchers
 import dagger.Binds
 import dagger.Module
-import dagger.Provides
 import dagger.hilt.InstallIn
-import dagger.hilt.android.qualifiers.ApplicationContext
 import dagger.hilt.components.SingletonComponent
 import javax.inject.Singleton
 
@@ -24,13 +21,4 @@ abstract class AppBindingsModule {
     @Binds
     @Singleton
     abstract fun bindDeviceIdentity(impl: DefaultDeviceIdentityProvider): DeviceIdentityProvider
-}
-
-@Module
-@InstallIn(SingletonComponent::class)
-object AppProvidesModule {
-
-    @Provides
-    @Singleton
-    fun provideAppContext(@ApplicationContext context: Context): Context = context
 }

@@ -5,7 +5,9 @@ import androidx.lifecycle.viewModelScope
 import attendance.help.device.device.DeviceIdentityProvider
 import attendance.help.device.domain.model.ConnectionState
 import attendance.help.device.domain.model.DeviceRole
+import attendance.help.device.domain.model.PeerDevice
 import attendance.help.device.domain.repository.SessionRepository
+import attendance.help.device.webrtc.SessionController
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -16,25 +18,32 @@ import javax.inject.Inject
 data class HomeUiState(
     val role: DeviceRole? = null,
     val connectionState: ConnectionState = ConnectionState.NOT_PAIRED,
-    val deviceId: String = ""
+    val peer: PeerDevice? = null,
+    val deviceId: String = "",
+    val liveStatus: String = ""
 )
 
 @HiltViewModel
 class HomeViewModel @Inject constructor(
     sessionRepository: SessionRepository,
-    deviceIdentityProvider: DeviceIdentityProvider
+    deviceIdentityProvider: DeviceIdentityProvider,
+    sessionController: SessionController
 ) : ViewModel() {
 
     private val localDeviceId = deviceIdentityProvider.getOrCreateDeviceId()
 
     val uiState: StateFlow<HomeUiState> = combine(
         sessionRepository.deviceRole,
-        sessionRepository.connectionState
-    ) { role, connection ->
+        sessionRepository.connectionState,
+        sessionRepository.peerDevice,
+        sessionController.uiState
+    ) { role, connection, peer, live ->
         HomeUiState(
             role = role,
             connectionState = connection,
-            deviceId = localDeviceId
+            peer = peer,
+            deviceId = localDeviceId,
+            liveStatus = live.statusMessage
         )
     }.stateIn(
         scope = viewModelScope,

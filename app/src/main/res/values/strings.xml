@@ -1,28 +1,41 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Attendance Help</string>
-
     <string name="welcome_title">Attendance Help</string>
     <string name="welcome_subtitle">Link two phones. Control them as one.</string>
-
     <string name="choose_language">Choose language</string>
     <string name="language_english">English</string>
     <string name="language_arabic">العربية</string>
-
     <string name="choose_role_title">Choose this phone\'s role</string>
     <string name="role_controller">Controller</string>
-    <string name="role_controller_desc">The phone you hold. Starts cameras and sends commands.</string>
+    <string name="role_controller_desc">Phone you hold. Starts cameras and sends commands. Shows your own camera.</string>
     <string name="role_remote">Remote</string>
-    <string name="role_remote_desc">The other phone. Follows commands and shows the controller\'s face.</string>
-
+    <string name="role_remote_desc">Other phone. Follows commands. Shows the controller\'s face.</string>
     <string name="continue_action">Continue</string>
-    <string name="home_title">Session home</string>
-    <string name="home_controller_hint">You are the Controller. Pairing and dual-camera session come next.</string>
-    <string name="home_remote_hint">You are the Remote phone. Pairing and dual-camera session come next.</string>
+    <string name="home_title">Control center</string>
     <string name="connection_status_label">Connection</string>
-    <string name="connection_status_not_paired">Not paired yet</string>
-    <string name="step1_banner">Step 1 foundation — structure ready</string>
-
+    <string name="pairing_title">Pair devices</string>
+    <string name="pairing_controller_hint">Share this Tailscale IP and code with the Remote phone.</string>
+    <string name="pairing_remote_hint">Enter the Controller Tailscale IP and pairing code.</string>
+    <string name="your_ip_label">This phone IP</string>
+    <string name="pairing_code_label">Pairing code</string>
+    <string name="controller_ip_label">Controller Tailscale IP</string>
+    <string name="start_waiting">Start waiting</string>
+    <string name="connect_to_controller">Connect</string>
+    <string name="open_camera">Open cameras</string>
+    <string name="close_camera">Close cameras</string>
+    <string name="send_ping">Ping peer</string>
+    <string name="disconnect">Disconnect</string>
+    <string name="session_title">Live session</string>
+    <string name="permission_camera_required">Camera and microphone permissions are required for the dual-camera session.</string>
+    <string name="grant_permissions">Grant permissions</string>
     <string name="display_rule_controller">Controller screen: your own live camera</string>
     <string name="display_rule_remote">Remote screen: controller\'s live camera</string>
+    <string name="not_paired">Not paired</string>
+    <string name="waiting_peer">Waiting for peer</string>
+    <string name="connected">Connected</string>
+    <string name="ip_missing">No IP found. Connect Tailscale, then tap refresh.</string>
+    <string name="refresh_ip">Refresh IP</string>
+    <string name="go_session">Open live session</string>
+    <string name="device_id_label">Device ID</string>
 </resources>

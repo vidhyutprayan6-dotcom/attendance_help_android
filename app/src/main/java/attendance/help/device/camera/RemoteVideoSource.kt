@@ -1,21 +1,22 @@
 package attendance.help.device.camera
 
+import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.Inject
+import javax.inject.Singleton
 
 /**
- * Represents the inbound Controller video on the Remote device (Step 7).
- * Remote UI binds to this source for display — not to its own camera preview.
+ * Marks that the Remote UI should render the inbound Controller video track.
  */
+@Singleton
 class RemoteVideoSource @Inject constructor() : CameraSource {
-    @Volatile
-    override var isRunning: Boolean = false
-        private set
+    private val running = AtomicBoolean(false)
+    override val isRunning: Boolean get() = running.get()
 
     override suspend fun start() {
-        isRunning = true
+        running.set(true)
     }
 
     override suspend fun stop() {
-        isRunning = false
+        running.set(false)
     }
 }

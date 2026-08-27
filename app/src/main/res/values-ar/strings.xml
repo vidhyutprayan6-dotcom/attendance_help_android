@@ -1,28 +1,41 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">مساعدة الحضور</string>
-
     <string name="welcome_title">مساعدة الحضور</string>
     <string name="welcome_subtitle">اربط هاتفين. تحكّم بهما كجهاز واحد.</string>
-
     <string name="choose_language">اختر اللغة</string>
     <string name="language_english">English</string>
     <string name="language_arabic">العربية</string>
-
     <string name="choose_role_title">اختر دور هذا الهاتف</string>
     <string name="role_controller">جهاز التحكم</string>
-    <string name="role_controller_desc">الهاتف الذي تمسكه. يشغّل الكاميرات ويرسل الأوامر.</string>
+    <string name="role_controller_desc">الهاتف الذي تمسكه. يشغّل الكاميرات ويرسل الأوامر. يعرض كاميرتك.</string>
     <string name="role_remote">الهاتف البعيد</string>
-    <string name="role_remote_desc">الهاتف الآخر. ينفّذ الأوامر ويعرض وجه المستخدم على جهاز التحكم.</string>
-
+    <string name="role_remote_desc">الهاتف الآخر. ينفّذ الأوامر ويعرض وجه جهاز التحكم.</string>
     <string name="continue_action">متابعة</string>
-    <string name="home_title">الجلسة</string>
-    <string name="home_controller_hint">أنت على جهاز التحكم. الاقتران وجلسة الكاميرتين قادمان لاحقاً.</string>
-    <string name="home_remote_hint">أنت على الهاتف البعيد. الاقتران وجلسة الكاميرتين قادمان لاحقاً.</string>
+    <string name="home_title">مركز التحكم</string>
     <string name="connection_status_label">الاتصال</string>
-    <string name="connection_status_not_paired">غير مقترن بعد</string>
-    <string name="step1_banner">الخطوة 1 — الأساس جاهز</string>
-
+    <string name="pairing_title">اقتران الأجهزة</string>
+    <string name="pairing_controller_hint">شارك عنوان Tailscale IP ورمز الاقتران مع الهاتف البعيد.</string>
+    <string name="pairing_remote_hint">أدخل عنوان IP لجهاز التحكم ورمز الاقتران.</string>
+    <string name="your_ip_label">عنوان هذا الهاتف</string>
+    <string name="pairing_code_label">رمز الاقتران</string>
+    <string name="controller_ip_label">عنوان Tailscale لجهاز التحكم</string>
+    <string name="start_waiting">بدء الانتظار</string>
+    <string name="connect_to_controller">اتصال</string>
+    <string name="open_camera">تشغيل الكاميرات</string>
+    <string name="close_camera">إيقاف الكاميرات</string>
+    <string name="send_ping">اختبار الاتصال</string>
+    <string name="disconnect">قطع الاتصال</string>
+    <string name="session_title">جلسة مباشرة</string>
+    <string name="permission_camera_required">يلزم إذن الكاميرا والميكروفون لجلسة الكاميرتين.</string>
+    <string name="grant_permissions">منح الأذونات</string>
     <string name="display_rule_controller">شاشة التحكم: كاميرتك المباشرة</string>
-    <string name="display_rule_remote">الشاشة البعيدة: كاميرا جهاز التحكم المباشرة</string>
+    <string name="display_rule_remote">الشاشة البعيدة: كاميرا جهاز التحكم</string>
+    <string name="not_paired">غير مقترن</string>
+    <string name="waiting_peer">بانتظار الجهاز الآخر</string>
+    <string name="connected">متصل</string>
+    <string name="ip_missing">لا يوجد عنوان. فعّل Tailscale ثم حدّث.</string>
+    <string name="refresh_ip">تحديث العنوان</string>
+    <string name="go_session">فتح الجلسة المباشرة</string>
+    <string name="device_id_label">معرّف الجهاز</string>
 </resources>

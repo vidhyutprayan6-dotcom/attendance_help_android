@@ -15,19 +15,15 @@ android {
         minSdk = 29
         targetSdk = 35
         versionCode = 1
-        versionName = "0.1.0"
+        versionName = "1.0.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-
-        // Default signaling port for peer-to-peer over Tailscale (used in later steps).
         buildConfigField("int", "SIGNALING_PORT", "8765")
     }
 
     buildTypes {
         debug {
             isMinifyEnabled = false
-            applicationIdSuffix = ".debug"
-            versionNameSuffix = "-debug"
         }
         release {
             isMinifyEnabled = true
@@ -84,23 +80,24 @@ dependencies {
 
     implementation(libs.kotlinx.coroutines.android)
 
-    // Persistence — wired in later steps (pairing / device state).
     implementation(libs.androidx.datastore.preferences)
     implementation(libs.androidx.room.runtime)
     implementation(libs.androidx.room.ktx)
     ksp(libs.androidx.room.compiler)
     implementation(libs.androidx.security.crypto)
 
-    // Network — Tailscale IP messaging / signaling (later steps).
     implementation(libs.okhttp)
     implementation(libs.okhttp.logging)
+    implementation(libs.java.websocket)
+    implementation(libs.gson)
 
-    // CameraX — dual-camera session (later steps).
     implementation(libs.androidx.camera.core)
     implementation(libs.androidx.camera.camera2)
     implementation(libs.androidx.camera.lifecycle)
     implementation(libs.androidx.camera.view)
 
-    // Structured logging (no secrets in logs).
+    // Stream's maintained Google WebRTC Android build (peer connection + renderers).
+    implementation(libs.stream.webrtc)
+
     implementation(libs.timber)
 }

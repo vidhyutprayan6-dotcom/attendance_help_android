@@ -1,21 +1,26 @@
 package attendance.help.device.camera
 
+import attendance.help.device.webrtc.PeerConnectionManager
 import javax.inject.Inject
+import javax.inject.Singleton
 
 /**
- * CameraX-backed local capture (Step 6).
- * On Controller this feeds both local preview and the outbound WebRTC track.
+ * Local capture via WebRTC Camera2 capturer (front camera).
+ * CameraX remains in the project for future alternate pipelines / preview tooling;
+ * WebRTC capturer owns the single camera session to avoid dual-open conflicts.
  */
-class LocalCameraSource @Inject constructor() : CameraSource {
-    @Volatile
-    override var isRunning: Boolean = false
-        private set
+@Singleton
+class LocalCameraSource @Inject constructor(
+    private val peerConnectionManager: PeerConnectionManager
+) : CameraSource {
+    override val isRunning: Boolean
+        get() = peerConnectionManager.isCameraRunning()
 
     override suspend fun start() {
-        isRunning = true
+        peerConnectionManager.startCamera(preferFront = true)
     }
 
     override suspend fun stop() {
-        isRunning = false
+        peerConnectionManager.stopCamera()
     }
 }

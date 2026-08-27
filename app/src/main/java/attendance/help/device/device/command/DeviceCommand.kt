@@ -1,10 +1,5 @@
 package attendance.help.device.device.command
 
-/**
- * Command pattern root for unrestricted remote control.
- * Concrete commands (camera, status, future device actions) plug in here
- * without rewriting network / WebRTC layers.
- */
 interface DeviceCommand {
     val type: String
     fun toPayload(): String
@@ -16,4 +11,43 @@ object CommandTypes {
     const val DEVICE_STATUS = "DEVICE_STATUS"
     const val PING = "PING"
     const val PONG = "PONG"
+}
+
+data class OpenCameraCommand(val requestedByDeviceId: String) : DeviceCommand {
+    override val type: String = CommandTypes.OPEN_CAMERA
+    override fun toPayload(): String =
+        """{"type":"$type","by":"$requestedByDeviceId"}"""
+}
+
+data class CloseCameraCommand(val requestedByDeviceId: String) : DeviceCommand {
+    override val type: String = CommandTypes.CLOSE_CAMERA
+    override fun toPayload(): String =
+        """{"type":"$type","by":"$requestedByDeviceId"}"""
+}
+
+data class PingCommand(val requestedByDeviceId: String) : DeviceCommand {
+    override val type: String = CommandTypes.PING
+    override fun toPayload(): String =
+        """{"type":"$type","by":"$requestedByDeviceId"}"""
+}
+
+data class PongCommand(val requestedByDeviceId: String) : DeviceCommand {
+    override val type: String = CommandTypes.PONG
+    override fun toPayload(): String =
+        """{"type":"$type","by":"$requestedByDeviceId"}"""
+}
+
+data class StatusCommand(
+    val requestedByDeviceId: String,
+    val cameraOn: Boolean,
+    val role: String
+) : DeviceCommand {
+    override val type: String = CommandTypes.DEVICE_STATUS
+    override fun toPayload(): String =
+        """{"type":"$type","by":"$requestedByDeviceId","cameraOn":$cameraOn,"role":"$role"}"""
+}
+
+object CommandParser {
+    fun typeOf(payload: String): String? =
+        Regex(""""type"\s*:\s*"([^"]+)"""").find(payload)?.groupValues?.getOrNull(1)
 }

@@ -4,4 +4,6 @@ object Routes {
     const val Welcome = "welcome"
     const val RoleSelect = "role_select"
     const val Home = "home"
+    const val Pairing = "pairing"
+    const val Session = "session"
 }

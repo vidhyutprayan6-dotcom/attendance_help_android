@@ -70,10 +70,13 @@ class SessionController @Inject constructor(
 
     private var remoteRenderer: SurfaceViewRenderer? = null
     private var localPipRenderer: SurfaceViewRenderer? = null
-    private var inboundVideoTrack: VideoTrack? = null
+    private var inboundScreenTrack: VideoTrack? = null
+    private var inboundCameraTrack: VideoTrack? = null
 
     private var pendingOfferFromId: String? = null
     private var pendingOfferSdp: String? = null
+    private var remoteScreenReady = false
+    private var sessionEpoch = 0
     private var touchDownX: Float? = null
     private var touchDownY: Float? = null
 
@@ -98,24 +101,29 @@ class SessionController @Inject constructor(
         }
     }
 
-    fun bindRenderers(remote: SurfaceViewRenderer?, localPip: SurfaceViewRenderer?) {
-        remoteRenderer = remote
-        localPipRenderer = localPip
-        remote?.let {
+    fun bindRenderers(screenRenderer: SurfaceViewRenderer?, cameraFeedRenderer: SurfaceViewRenderer?) {
+        remoteRenderer = screenRenderer
+        localPipRenderer = cameraFeedRenderer
+        screenRenderer?.let {
             peerConnectionManager.initRemoteRenderer(it)
-            inboundVideoTrack?.addSink(it)
+            inboundScreenTrack?.addSink(it)
         }
-        localPip?.let {
+        cameraFeedRenderer?.let {
             peerConnectionManager.initLocalRenderer(it)
-            if (peerConnectionManager.isCameraRunning()) {
+            if (_ui.value.mode == DeviceMode.CONTROL && peerConnectionManager.isLocalMediaPublishing()) {
                 peerConnectionManager.attachLocalVideoTo(it)
+            } else {
+                inboundCameraTrack?.addSink(it)
             }
         }
     }
 
     fun unbindRenderers() {
-        remoteRenderer?.let { r -> inboundVideoTrack?.removeSink(r) }
-        localPipRenderer?.let { peerConnectionManager.detachLocalVideoFrom(it) }
+        remoteRenderer?.let { r -> inboundScreenTrack?.removeSink(r) }
+        localPipRenderer?.let { r ->
+            inboundCameraTrack?.removeSink(r)
+            peerConnectionManager.detachLocalVideoFrom(r)
+        }
         remoteRenderer = null
         localPipRenderer = null
     }
@@ -273,11 +281,12 @@ class SessionController @Inject constructor(
         )
     }
 
-    /** Control starts camera + offer after bind; Remote answers with screen share. */
+    /** Control starts camera + offer only after Remote screen is ready. */
     private suspend fun beginAutoDualCamera() {
         val peerId = boundPeerId ?: return
         if (_ui.value.mode != DeviceMode.CONTROL) return
-        ensurePeer(isOfferer = true)
+        if (!remoteScreenReady) return
+        ensurePeer(isOfferer = true, force = false)
         startControlMedia()
         hubClient?.send(HubMessage.CameraStart(fromId = localDeviceId, toId = peerId))
         peerConnectionManager.sendData(OpenCameraCommand(localDeviceId).toPayload())
@@ -317,6 +326,7 @@ class SessionController @Inject constructor(
         scope.launch {
             val peerId = boundPeerId
             if (peerId != null) {
+                hubClient?.send(HubMessage.CameraStop(fromId = localDeviceId, toId = peerId))
                 hubClient?.send(
                     HubMessage.SessionUnbind(
                         fromId = localDeviceId,
@@ -332,10 +342,13 @@ class SessionController @Inject constructor(
         stopBothCamerasLocally()
         peerConnectionManager.release()
         peerCreated = false
-        inboundVideoTrack = null
+        inboundScreenTrack = null
+        inboundCameraTrack = null
         boundPeerId = null
         pendingOfferSdp = null
         pendingOfferFromId = null
+        remoteScreenReady = false
+        sessionEpoch++
         sessionRepository.setSessionLinkState(
             if (_ui.value.mode == DeviceMode.REMOTE) {
                 SessionLinkState.WAITING_FOR_CONTROL
@@ -352,7 +365,7 @@ class SessionController @Inject constructor(
                     SessionLinkState.SELECTING_REMOTE
                 },
                 dualCamera = DualCameraSessionState(),
-                needsScreenSharePermission = false,
+                needsScreenSharePermission = mode == DeviceMode.REMOTE,
                 screenShareActive = false,
                 statusMessage = message,
                 webrtcState = "CLOSED"
@@ -365,7 +378,19 @@ class SessionController @Inject constructor(
                 else -> ""
             }
         )
+        // Re-register Remote so hub list shows it as available again.
+        if (_ui.value.mode == DeviceMode.REMOTE) {
+            val name = sessionRepository.displayName.first()
+            hubClient?.send(
+                HubMessage.Register(
+                    deviceId = localDeviceId,
+                    displayName = name,
+                    mode = DeviceMode.REMOTE.name
+                )
+            )
+        }
         if (_ui.value.mode == DeviceMode.CONTROL) {
+            kotlinx.coroutines.delay(300)
             hubClient?.send(HubMessage.RequestRemotes(localDeviceId))
         }
     }
@@ -481,6 +506,15 @@ class SessionController @Inject constructor(
                     } else {
                         HubDevice(message.controlDeviceId, message.controlName, DeviceMode.CONTROL, false)
                     }
+                    // Fresh WebRTC session for every bind.
+                    stopBothCamerasLocally()
+                    peerConnectionManager.release()
+                    peerCreated = false
+                    inboundScreenTrack = null
+                    inboundCameraTrack = null
+                    pendingOfferSdp = null
+                    pendingOfferFromId = null
+                    remoteScreenReady = false
                     boundPeerId = peer.deviceId
                     sessionRepository.setSessionLinkState(SessionLinkState.BOUND)
                     update {
@@ -488,37 +522,45 @@ class SessionController @Inject constructor(
                             boundPeer = peer,
                             sessionLinkState = SessionLinkState.BOUND,
                             statusMessage = if (iAmControl) {
-                                "Connected — starting full remote control…"
+                                "Connected — waiting for Remote screen share…"
                             } else {
                                 "Control connected — allow screen share to be controlled"
                             },
                             needsScreenSharePermission = !iAmControl,
+                            screenShareActive = false,
                             accessibilityEnabled = RemoteInputAccessibilityService.isEnabled()
                         )
                     }
                     refreshStatusNotification(
                         detail = if (iAmControl) "Controlling ${peer.displayName}" else "Being controlled"
                     )
-                    ensurePeer(isOfferer = iAmControl)
-                    if (iAmControl) {
-                        kotlinx.coroutines.delay(900)
-                        beginAutoDualCamera()
-                    } else {
-                        // Prompt Remote to share screen ASAP so answer can include screen track.
+                    ensurePeer(isOfferer = iAmControl, force = true)
+                    if (!iAmControl) {
                         requestScreenSharePermission()
                     }
                 }
-                is HubMessage.SessionUnbind -> {
-                    applySessionReleased("Remote released")
-                }
+                is HubMessage.SessionUnbind -> Unit // client→server only
                 is HubMessage.SessionUnbound -> {
-                    applySessionReleased(message.reason.ifBlank { "Remote released" })
+                    if (boundPeerId != null || _ui.value.boundPeer != null) {
+                        applySessionReleased(
+                            message.reason.ifBlank { "Remote released" }
+                        )
+                    }
+                }
+                is HubMessage.ScreenReady -> {
+                    if (_ui.value.mode != DeviceMode.CONTROL) return@launch
+                    if (message.toId != localDeviceId) return@launch
+                    remoteScreenReady = true
+                    update {
+                        copy(statusMessage = "Remote screen ready — starting video…")
+                    }
+                    beginAutoDualCamera()
                 }
                 is HubMessage.RelayOffer -> {
-                    ensurePeer(isOfferer = false)
+                    ensurePeer(isOfferer = false, force = false)
                     pendingOfferFromId = message.fromId
                     pendingOfferSdp = message.sdp
-                    if (_ui.value.mode == DeviceMode.REMOTE && !peerConnectionManager.isCameraRunning()) {
+                    if (_ui.value.mode == DeviceMode.REMOTE && !peerConnectionManager.isLocalMediaPublishing()) {
                         update { copy(needsScreenSharePermission = true) }
                         if (!_ui.value.screenShareActive) {
                             requestScreenSharePermission()
@@ -537,7 +579,7 @@ class SessionController @Inject constructor(
                     )
                 }
                 is HubMessage.CameraStart -> {
-                    ensurePeer(isOfferer = false)
+                    ensurePeer(isOfferer = false, force = false)
                     if (_ui.value.mode == DeviceMode.REMOTE) {
                         update { copy(needsScreenSharePermission = !peerConnectionManager.isScreenSharing()) }
                         if (!peerConnectionManager.isScreenSharing()) {
@@ -563,11 +605,11 @@ class SessionController @Inject constructor(
 
     private suspend fun onScreenShareGranted(resultData: Intent) {
         if (_ui.value.mode != DeviceMode.REMOTE) return
-        ensurePeer(isOfferer = false)
+        val peerId = boundPeerId ?: return
+        ensurePeer(isOfferer = false, force = false)
         withContext(Dispatchers.Main) {
             ScreenShareService.start(context)
             peerConnectionManager.startScreenShare(resultData)
-            localPipRenderer?.let { peerConnectionManager.attachLocalVideoTo(it) }
             update {
                 copy(
                     needsScreenSharePermission = false,
@@ -578,18 +620,19 @@ class SessionController @Inject constructor(
                         controlShowsRemoteFeed = true,
                         remoteShowsControlFeed = true
                     ),
-                    statusMessage = "Cameras ON — Control feed on both; screen shared for full control",
+                    statusMessage = "Screen sharing — Control can see and operate this phone",
                     accessibilityEnabled = RemoteInputAccessibilityService.isEnabled()
                 )
             }
         }
+        hubClient?.send(HubMessage.ScreenReady(fromId = localDeviceId, toId = peerId))
         tryAnswerPendingOffer()
     }
 
     private fun tryAnswerPendingOffer() {
         val sdp = pendingOfferSdp ?: return
         val fromId = pendingOfferFromId ?: return
-        if (!peerConnectionManager.isCameraRunning()) return
+        if (!peerConnectionManager.isLocalMediaPublishing()) return
         pendingOfferSdp = null
         pendingOfferFromId = null
         peerConnectionManager.setRemoteDescription(
@@ -605,14 +648,20 @@ class SessionController @Inject constructor(
                         )
                     )
                 },
-                onError = { Timber.e(it) }
+                onError = { err ->
+                    Timber.e("createAnswer failed: %s", err)
+                    scope.launch {
+                        update { copy(statusMessage = "Video answer failed: $err") }
+                    }
+                }
             )
         }
     }
 
-    private fun ensurePeer(isOfferer: Boolean) {
+    private fun ensurePeer(isOfferer: Boolean, force: Boolean = false) {
         peerConnectionManager.createPeerConnection(
             isController = isOfferer,
+            force = force || !peerCreated,
             listeners = WebRtcListeners(
                 onIceCandidate = { c ->
                     val peerId = boundPeerId ?: return@WebRtcListeners
@@ -638,8 +687,18 @@ class SessionController @Inject constructor(
                 onDataMessage = { handleData(it) },
                 onRemoteVideoTrack = { track ->
                     scope.launch {
-                        inboundVideoTrack = track
-                        remoteRenderer?.let { track.addSink(it) }
+                        if (_ui.value.mode == DeviceMode.CONTROL) {
+                            remoteRenderer?.let { r -> inboundScreenTrack?.removeSink(r) }
+                            inboundScreenTrack = track
+                            remoteRenderer?.let { track.addSink(it) }
+                            update {
+                                copy(statusMessage = "Remote screen connected — touch to control")
+                            }
+                        } else {
+                            localPipRenderer?.let { r -> inboundCameraTrack?.removeSink(r) }
+                            inboundCameraTrack = track
+                            localPipRenderer?.let { track.addSink(it) }
+                        }
                     }
                 }
             )
@@ -789,9 +848,11 @@ class SessionController @Inject constructor(
         stopBothCamerasLocally()
         peerConnectionManager.release()
         peerCreated = false
-        inboundVideoTrack = null
+        inboundScreenTrack = null
+        inboundCameraTrack = null
         pendingOfferSdp = null
         pendingOfferFromId = null
+        remoteScreenReady = false
     }
 
     private suspend fun failServer(message: String) {

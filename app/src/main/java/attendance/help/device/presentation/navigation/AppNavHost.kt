@@ -96,6 +96,11 @@ fun AppNavHost(startDestination: String) {
             val vm: RemoteListViewModel = hiltViewModel()
             val state by vm.ui.collectAsStateWithLifecycle()
             LaunchedEffect(Unit) { vm.refresh() }
+            LaunchedEffect(state.sessionLinkState) {
+                if (state.sessionLinkState == attendance.help.device.domain.model.SessionLinkState.SELECTING_REMOTE) {
+                    vm.refresh()
+                }
+            }
             RemoteListScreen(
                 state = state,
                 onRefresh = vm::refresh,

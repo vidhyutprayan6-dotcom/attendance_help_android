@@ -44,7 +44,7 @@
     <string name="device_id_label">Device ID</string>
     <string name="bound_with">Connected with</string>
     <string name="control_title">Remote control</string>
-    <string name="control_hint_control">Camera feed shows your face on both phones. Below: Remote screen — touch to fully control it.</string>
+    <string name="control_hint_control">Camera feed shows your face on both phones. Wait for Remote screen below, then touch to control.</string>
     <string name="control_hint_remote">Camera feed shows the Control user. Allow screen share and Accessibility so this phone can be fully controlled.</string>
     <string name="release_remote">Disconnect from this remote</string>
     <string name="release_from_control">Disconnect from Control</string>

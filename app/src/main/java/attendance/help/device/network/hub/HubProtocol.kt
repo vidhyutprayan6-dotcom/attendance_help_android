@@ -92,6 +92,11 @@ sealed class HubMessage {
         override val type = TYPE_CAMERA_STOP
     }
 
+    /** Remote → hub → Control: screen capture is active; safe to start WebRTC offer. */
+    data class ScreenReady(val fromId: String, val toId: String) : HubMessage() {
+        override val type = TYPE_SCREEN_READY
+    }
+
     data class ErrorMsg(val message: String) : HubMessage() {
         override val type = TYPE_ERROR
     }
@@ -111,6 +116,7 @@ sealed class HubMessage {
         const val TYPE_ICE = "ice"
         const val TYPE_CAMERA_START = "camera_start"
         const val TYPE_CAMERA_STOP = "camera_stop"
+        const val TYPE_SCREEN_READY = "screen_ready"
         const val TYPE_ERROR = "error"
     }
 }
@@ -181,6 +187,10 @@ class HubCodec(private val gson: Gson = Gson()) {
                 o.addProperty("toId", message.toId)
             }
             is HubMessage.CameraStop -> {
+                o.addProperty("fromId", message.fromId)
+                o.addProperty("toId", message.toId)
+            }
+            is HubMessage.ScreenReady -> {
                 o.addProperty("fromId", message.fromId)
                 o.addProperty("toId", message.toId)
             }
@@ -258,6 +268,10 @@ class HubCodec(private val gson: Gson = Gson()) {
                 toId = o.get("toId").asString
             )
             HubMessage.TYPE_CAMERA_STOP -> HubMessage.CameraStop(
+                fromId = o.get("fromId").asString,
+                toId = o.get("toId").asString
+            )
+            HubMessage.TYPE_SCREEN_READY -> HubMessage.ScreenReady(
                 fromId = o.get("fromId").asString,
                 toId = o.get("toId").asString
             )

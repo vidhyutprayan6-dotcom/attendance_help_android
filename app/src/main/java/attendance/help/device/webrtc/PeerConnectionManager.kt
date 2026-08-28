@@ -109,11 +109,13 @@ class PeerConnectionManager @Inject constructor(
         this.listeners = listeners
 
         val iceServers = listOf(
-            PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer()
+            PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer(),
+            PeerConnection.IceServer.builder("stun:stun1.l.google.com:19302").createIceServer()
         )
         val rtcConfig = PeerConnection.RTCConfiguration(iceServers).apply {
             sdpSemantics = PeerConnection.SdpSemantics.UNIFIED_PLAN
             continualGatheringPolicy = PeerConnection.ContinualGatheringPolicy.GATHER_CONTINUALLY
+            iceTransportsType = PeerConnection.IceTransportsType.ALL
         }
 
         peerConnection = factory!!.createPeerConnection(rtcConfig, object : PeerConnection.Observer {
@@ -275,6 +277,10 @@ class PeerConnectionManager @Inject constructor(
 
     fun isCameraRunning(): Boolean = mediaRunning.get()
     fun isScreenSharing(): Boolean = sharingScreen && mediaRunning.get()
+    /** True when local video (camera or screen) is being published to the peer. */
+    fun isLocalMediaPublishing(): Boolean = mediaRunning.get()
+
+    fun hasPeerConnection(): Boolean = peerConnection != null
 
     @Synchronized
     fun release() {

@@ -39,6 +39,5 @@ class ScreenCapturePermissionActivity : ComponentActivity() {
     companion object {
         fun intent(context: Context): Intent =
             Intent(context, ScreenCapturePermissionActivity::class.java)
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
     }
 }

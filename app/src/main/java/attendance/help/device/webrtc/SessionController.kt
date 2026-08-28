@@ -77,6 +77,7 @@ class SessionController @Inject constructor(
     private var pendingOfferSdp: String? = null
     private var remoteScreenReady = false
     private var sessionEpoch = 0
+    private val pendingIceCandidates = mutableListOf<IceCandidate>()
     private var touchDownX: Float? = null
     private var touchDownY: Float? = null
 
@@ -84,6 +85,7 @@ class SessionController @Inject constructor(
     val uiState: StateFlow<AppLinkSnapshot> = _ui.asStateFlow()
 
     init {
+        startPresenceHeartbeat()
         scope.launch {
             screenShareCoordinator.permissionResults.collect { intent ->
                 onScreenShareGranted(intent)
@@ -129,7 +131,48 @@ class SessionController @Inject constructor(
     }
 
     fun requestScreenSharePermission() {
-        context.startActivity(ScreenCapturePermissionActivity.intent(context))
+        val launched = screenShareCoordinator.requestScreenCapture()
+        if (!launched) {
+            update {
+                copy(
+                    statusMessage = "Open the app on the Remote phone, then tap Allow screen share again"
+                )
+            }
+        }
+    }
+
+    /** Re-register with hub so Remote appears in Control list (fixes stale connections). */
+    fun announcePresence() {
+        scope.launch {
+            if (_ui.value.serverLinkState != ServerLinkState.CONNECTED) return@launch
+            val mode = _ui.value.mode
+            if (mode == DeviceMode.NONE) return@launch
+            val name = sessionRepository.displayName.first()
+            hubClient?.send(
+                HubMessage.Register(
+                    deviceId = localDeviceId,
+                    displayName = name,
+                    mode = mode.name
+                )
+            )
+            if (mode == DeviceMode.CONTROL) {
+                hubClient?.send(HubMessage.RequestRemotes(localDeviceId))
+            }
+            Timber.i("announcePresence mode=%s", mode)
+        }
+    }
+
+    fun startPresenceHeartbeat() {
+        scope.launch {
+            while (true) {
+                kotlinx.coroutines.delay(12_000)
+                if (_ui.value.serverLinkState == ServerLinkState.CONNECTED &&
+                    _ui.value.mode != DeviceMode.NONE
+                ) {
+                    announcePresence()
+                }
+            }
+        }
     }
 
     fun refreshAccessibilityState() {
@@ -348,6 +391,7 @@ class SessionController @Inject constructor(
         pendingOfferSdp = null
         pendingOfferFromId = null
         remoteScreenReady = false
+        clearPendingIce()
         sessionEpoch++
         sessionRepository.setSessionLinkState(
             if (_ui.value.mode == DeviceMode.REMOTE) {
@@ -458,6 +502,7 @@ class SessionController @Inject constructor(
                     } else {
                         refreshStatusNotification(detail = "Choose Remote / Control / Nothing")
                     }
+                    announcePresence()
                 }
             },
             onClosed = {
@@ -515,6 +560,7 @@ class SessionController @Inject constructor(
                     pendingOfferSdp = null
                     pendingOfferFromId = null
                     remoteScreenReady = false
+                    clearPendingIce()
                     boundPeerId = peer.deviceId
                     sessionRepository.setSessionLinkState(SessionLinkState.BOUND)
                     update {
@@ -571,12 +617,19 @@ class SessionController @Inject constructor(
                 is HubMessage.RelayAnswer -> {
                     peerConnectionManager.setRemoteDescription(
                         SessionDescription(SessionDescription.Type.ANSWER, message.sdp)
-                    )
+                    ) {
+                        flushPendingIceCandidates()
+                    }
                 }
                 is HubMessage.RelayIce -> {
-                    peerConnectionManager.addIceCandidate(
-                        IceCandidate(message.sdpMid, message.sdpMLineIndex ?: 0, message.candidate)
+                    val candidate = IceCandidate(
+                        message.sdpMid,
+                        message.sdpMLineIndex ?: 0,
+                        message.candidate
                     )
+                    if (!peerConnectionManager.addIceCandidate(candidate)) {
+                        pendingIceCandidates.add(candidate)
+                    }
                 }
                 is HubMessage.CameraStart -> {
                     ensurePeer(isOfferer = false, force = false)
@@ -647,6 +700,7 @@ class SessionController @Inject constructor(
                             sdp = answer.description
                         )
                     )
+                    flushPendingIceCandidates()
                 },
                 onError = { err ->
                     Timber.e("createAnswer failed: %s", err)
@@ -656,6 +710,17 @@ class SessionController @Inject constructor(
                 }
             )
         }
+    }
+
+    private fun flushPendingIceCandidates() {
+        if (pendingIceCandidates.isEmpty()) return
+        val copy = pendingIceCandidates.toList()
+        pendingIceCandidates.clear()
+        copy.forEach { peerConnectionManager.addIceCandidate(it) }
+    }
+
+    private fun clearPendingIce() {
+        pendingIceCandidates.clear()
     }
 
     private fun ensurePeer(isOfferer: Boolean, force: Boolean = false) {
@@ -853,6 +918,7 @@ class SessionController @Inject constructor(
         pendingOfferSdp = null
         pendingOfferFromId = null
         remoteScreenReady = false
+        clearPendingIce()
     }
 
     private suspend fun failServer(message: String) {

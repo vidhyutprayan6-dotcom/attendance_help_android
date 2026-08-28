@@ -40,7 +40,7 @@
     <string name="actions_section">Actions</string>
     <string name="open_mode_settings">Mode settings</string>
     <string name="open_remote_list">Choose Remote to control</string>
-    <string name="waiting_as_remote">Waiting as Remote — controllable by any Control phone</string>
+    <string name="waiting_as_remote">Waiting as Remote — keep this app open so Control can find this phone</string>
     <string name="device_id_label">Device ID</string>
     <string name="bound_with">Connected with</string>
     <string name="control_title">Remote control</string>
@@ -69,7 +69,7 @@
     <string name="screen_share_channel_desc">Shown while this Remote phone shares its screen</string>
 
     <string name="remote_list_title">Remotes you can control</string>
-    <string name="remote_list_empty">No Remote phones online yet.</string>
+    <string name="remote_list_empty">No Remote phones online. On the Remote phone: connect, set Remote mode, keep app open, then tap Refresh.</string>
     <string name="remote_available">Available</string>
     <string name="remote_busy">Busy (already controlled)</string>
     <string name="select_remote">Control this phone</string>

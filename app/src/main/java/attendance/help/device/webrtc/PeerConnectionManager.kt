@@ -261,8 +261,15 @@ class PeerConnectionManager @Inject constructor(
         }, sdp)
     }
 
-    fun addIceCandidate(candidate: IceCandidate) {
-        peerConnection?.addIceCandidate(candidate)
+    fun addIceCandidate(candidate: IceCandidate): Boolean {
+        val pc = peerConnection ?: return false
+        return runCatching {
+            pc.addIceCandidate(candidate)
+            true
+        }.getOrElse {
+            Timber.w("ICE candidate queued/failed: %s", it.message)
+            false
+        }
     }
 
     fun sendData(message: String) {

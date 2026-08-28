@@ -21,6 +21,9 @@ class RemoteListViewModel @Inject constructor(
         AppLinkSnapshot()
     )
 
-    fun refresh() = sessionController.refreshRemoteList()
+    fun refresh() {
+        sessionController.announcePresence()
+        sessionController.refreshRemoteList()
+    }
     fun select(remote: HubDevice) = sessionController.selectRemote(remote)
 }

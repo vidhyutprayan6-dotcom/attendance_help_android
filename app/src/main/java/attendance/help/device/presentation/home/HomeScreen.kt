@@ -32,9 +32,17 @@ fun HomeScreen(
     onConnectSettings: () -> Unit,
     onRemoteList: () -> Unit,
     onOpenControl: () -> Unit,
-    onDisconnect: () -> Unit
+    onDisconnect: () -> Unit,
+    onAnnouncePresence: () -> Unit = {}
 ) {
     val serverOk = state.serverLinkState == ServerLinkState.CONNECTED
+
+    // Keep Remote registered on hub while waiting (fixes empty list after hub restart).
+    LaunchedEffect(serverOk, state.mode) {
+        if (serverOk && state.mode != DeviceMode.NONE) {
+            onAnnouncePresence()
+        }
+    }
 
     // Remote: when a Control phone connects, open control view automatically (no Camera Session menu).
     LaunchedEffect(state.mode, state.boundPeer, state.sessionLinkState) {

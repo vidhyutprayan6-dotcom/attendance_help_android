@@ -16,6 +16,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
+import attendance.help.device.device.control.ScreenShareCoordinator
 import attendance.help.device.domain.model.ServerLinkState
 import attendance.help.device.domain.repository.SessionRepository
 import attendance.help.device.presentation.navigation.AppNavHost
@@ -32,6 +33,7 @@ class MainActivity : ComponentActivity() {
 
     @Inject lateinit var sessionRepository: SessionRepository
     @Inject lateinit var sessionController: SessionController
+    @Inject lateinit var screenShareCoordinator: ScreenShareCoordinator
 
     private var startRoute by mutableStateOf<String?>(null)
 
@@ -42,6 +44,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        screenShareCoordinator.bindActivity(this)
         maybeRequestNotificationPermission()
         sessionController.restoreStatusBarIfNeeded()
 
@@ -63,6 +66,17 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        screenShareCoordinator.bindActivity(this)
+        sessionController.announcePresence()
+    }
+
+    override fun onDestroy() {
+        screenShareCoordinator.unbindActivity(this)
+        super.onDestroy()
     }
 
     private fun maybeRequestNotificationPermission() {

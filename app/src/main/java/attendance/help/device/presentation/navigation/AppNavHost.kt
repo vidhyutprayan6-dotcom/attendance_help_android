@@ -89,7 +89,8 @@ fun AppNavHost(startDestination: String) {
                     navController.navigate(Routes.Connect) {
                         popUpTo(Routes.Home) { inclusive = true }
                     }
-                }
+                },
+                onAnnouncePresence = vm::announcePresence
             )
         }
         composable(Routes.RemoteList) {

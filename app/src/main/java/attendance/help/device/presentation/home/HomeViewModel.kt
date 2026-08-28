@@ -24,4 +24,6 @@ class HomeViewModel @Inject constructor(
     fun disconnect() {
         viewModelScope.launch { sessionController.disconnectServer() }
     }
+
+    fun announcePresence() = sessionController.announcePresence()
 }

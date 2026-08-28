@@ -23,6 +23,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -34,18 +36,14 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import attendance.help.device.R
+import attendance.help.device.control.VideoCoordinateMapper
 import attendance.help.device.device.command.CommandTypes
 import attendance.help.device.domain.model.AppLinkSnapshot
 import attendance.help.device.domain.model.DeviceMode
+import attendance.help.device.domain.model.RemoteSessionState
 import attendance.help.device.domain.model.SessionLinkState
 import org.webrtc.SurfaceViewRenderer
 
-/**
- * Bound session UI (screen + touch control only).
- *
- * - Control: sees Remote screen, sends touches and system keys.
- * - Remote: shows connected Control name, allows screen share, enables Accessibility.
- */
 @Composable
 fun SessionScreen(
     state: AppLinkSnapshot,
@@ -54,8 +52,10 @@ fun SessionScreen(
     onUnbindRenderer: () -> Unit,
     onReleaseRemote: () -> Unit,
     onRequestScreenShare: () -> Unit,
+    onStopScreenShare: () -> Unit,
     onRefreshAccessibility: () -> Unit,
-    onTouch: (action: String, x: Float, y: Float) -> Unit,
+    onTap: (x: Float, y: Float) -> Unit,
+    onSwipe: (points: List<Pair<Float, Float>>, durationMs: Long) -> Unit,
     onRemoteKey: (type: String) -> Unit,
     onBack: () -> Unit
 ) {
@@ -105,6 +105,13 @@ fun SessionScreen(
                 style = MaterialTheme.typography.titleMedium
             )
         }
+        if (state.remoteSessionState != RemoteSessionState.DISCONNECTED) {
+            Text(
+                text = "Session: ${state.remoteSessionState.name.replace('_', ' ')}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.secondary
+            )
+        }
         if (state.statusMessage.isNotBlank()) {
             Text(state.statusMessage, style = MaterialTheme.typography.bodyMedium)
         }
@@ -136,18 +143,28 @@ fun SessionScreen(
                 Text(stringResource(R.string.screen_share_required))
                 Button(
                     onClick = onRequestScreenShare,
-                    modifier = Modifier.fillMaxWidth()
-                ) { Text(stringResource(R.string.allow_screen_share)) }
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = state.accessibilityEnabled && state.boundPeer != null
+                ) { Text(stringResource(R.string.start_screen_share)) }
                 Spacer(modifier = Modifier.height(8.dp))
             } else {
                 Text(
                     text = stringResource(R.string.screen_share_active),
                     color = MaterialTheme.colorScheme.primary
                 )
+                OutlinedButton(
+                    onClick = onStopScreenShare,
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text(stringResource(R.string.stop_screen_share)) }
             }
         }
 
         if (mode == DeviceMode.CONTROL && sessionActive) {
+            val videoW = state.captureGeometry.captureWidth.takeIf { it > 0 } ?: 1280
+            val videoH = state.captureGeometry.captureHeight.takeIf { it > 0 } ?: 720
+            val touchPath = remember { mutableStateListOf<Pair<Float, Float>>() }
+            var downTime by remember { mutableLongStateOf(0L) }
+
             Text(
                 text = stringResource(R.string.remote_screen_label),
                 style = MaterialTheme.typography.titleMedium
@@ -163,15 +180,53 @@ fun SessionScreen(
                         SurfaceViewRenderer(ctx).also { renderer ->
                             screenRenderer = renderer
                             renderer.setOnTouchListener { view, event ->
-                                val w = view.width.coerceAtLeast(1).toFloat()
-                                val h = view.height.coerceAtLeast(1).toFloat()
-                                val nx = (event.x / w).coerceIn(0f, 1f)
-                                val ny = (event.y / h).coerceIn(0f, 1f)
+                                val rendered = VideoCoordinateMapper.computeRenderedVideoRect(
+                                    view.width,
+                                    view.height,
+                                    videoW,
+                                    videoH
+                                )
                                 when (event.actionMasked) {
-                                    MotionEvent.ACTION_DOWN -> onTouch("down", nx, ny)
-                                    MotionEvent.ACTION_MOVE -> onTouch("move", nx, ny)
-                                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL ->
-                                        onTouch("up", nx, ny)
+                                    MotionEvent.ACTION_DOWN -> {
+                                        touchPath.clear()
+                                        downTime = System.currentTimeMillis()
+                                        VideoCoordinateMapper.touchToNormalized(
+                                            event.x,
+                                            event.y,
+                                            rendered
+                                        )?.let { (nx, ny) ->
+                                            touchPath.add(nx to ny)
+                                        }
+                                    }
+                                    MotionEvent.ACTION_MOVE -> {
+                                        VideoCoordinateMapper.touchToNormalized(
+                                            event.x,
+                                            event.y,
+                                            rendered
+                                        )?.let { (nx, ny) ->
+                                            if (touchPath.isEmpty() || touchPath.last() != nx to ny) {
+                                                touchPath.add(nx to ny)
+                                            }
+                                        }
+                                    }
+                                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                                        val norm = VideoCoordinateMapper.touchToNormalized(
+                                            event.x,
+                                            event.y,
+                                            rendered
+                                        )
+                                        if (norm != null) {
+                                            val duration = (System.currentTimeMillis() - downTime)
+                                                .coerceAtLeast(50L)
+                                            if (touchPath.size <= 1) {
+                                                onTap(norm.first, norm.second)
+                                            } else {
+                                                norm.let { touchPath.add(it) }
+                                                onSwipe(touchPath.toList(), duration)
+                                            }
+                                        }
+                                        touchPath.clear()
+                                    }
                                 }
                                 true
                             }

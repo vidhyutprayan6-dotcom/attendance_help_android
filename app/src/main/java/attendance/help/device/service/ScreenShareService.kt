@@ -2,6 +2,7 @@ package attendance.help.device.service
 
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
@@ -29,13 +30,27 @@ class ScreenShareService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == ACTION_STOP) {
+            Timber.tag("SCREEN_CAPTURE").i("Stop requested from notification")
+            stopCallback?.invoke()
+            stopSelf()
+            return START_NOT_STICKY
+        }
         ensureChannel()
+        val stopIntent = Intent(this, ScreenShareService::class.java).apply { action = ACTION_STOP }
+        val stopPending = PendingIntent.getService(
+            this,
+            0,
+            stopIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
         val notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle(getString(R.string.screen_share_notif_title))
             .setContentText(getString(R.string.screen_share_notif_text))
             .setSmallIcon(R.drawable.ic_stat_link)
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
+            .addAction(0, getString(R.string.stop_screen_share), stopPending)
             .build()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(
@@ -47,7 +62,7 @@ class ScreenShareService : Service() {
             startForeground(NOTIF_ID, notification)
         }
         foregroundReady.getAndSet(null)?.complete(Unit)
-        Timber.i("ScreenShareService foreground active")
+        Timber.tag("SCREEN_CAPTURE").i("Foreground service active")
         return START_STICKY
     }
 
@@ -72,22 +87,17 @@ class ScreenShareService : Service() {
     companion object {
         private const val CHANNEL_ID = "ah_screen_share"
         private const val NOTIF_ID = 4202
+        const val ACTION_STOP = "attendance.help.device.action.STOP_SCREEN_SHARE"
         private val foregroundReady = AtomicReference<CompletableDeferred<Unit>?>(null)
 
-        /** Starts FGS and waits until [startForeground] has run (required before MediaProjection). */
+        @Volatile
+        var stopCallback: (() -> Unit)? = null
+
         suspend fun startAndAwait(context: Context) {
             val deferred = CompletableDeferred<Unit>()
             foregroundReady.set(deferred)
-            val intent = Intent(context, ScreenShareService::class.java)
-            context.startForegroundService(intent)
-            withTimeout(10_000) {
-                deferred.await()
-            }
-        }
-
-        fun start(context: Context) {
-            val intent = Intent(context, ScreenShareService::class.java)
-            context.startForegroundService(intent)
+            context.startForegroundService(Intent(context, ScreenShareService::class.java))
+            withTimeout(10_000) { deferred.await() }
         }
 
         fun stop(context: Context) {

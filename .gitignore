@@ -26,3 +26,5 @@ app/release/
 secrets.properties
 backend/node_modules/
 backend/package-lock.json
+hs_err_pid*.log
+replay_pid*.log

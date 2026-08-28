@@ -125,8 +125,10 @@ fun AppNavHost(startDestination: String) {
                     navController.popBackStack()
                 },
                 onRequestScreenShare = vm::requestScreenShare,
+                onStopScreenShare = vm::stopScreenShare,
                 onRefreshAccessibility = vm::refreshAccessibility,
-                onTouch = vm::sendTouch,
+                onTap = vm::sendTap,
+                onSwipe = vm::sendSwipe,
                 onRemoteKey = vm::sendRemoteKey,
                 onBack = { navController.popBackStack() }
             )

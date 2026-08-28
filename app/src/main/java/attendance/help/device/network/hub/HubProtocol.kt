@@ -2,6 +2,7 @@ package attendance.help.device.network.hub
 
 import attendance.help.device.domain.model.DeviceMode
 import attendance.help.device.domain.model.HubDevice
+import attendance.help.device.domain.model.TurnServerConfig
 import com.google.gson.Gson
 import com.google.gson.JsonArray
 import com.google.gson.JsonObject
@@ -21,7 +22,11 @@ sealed class HubMessage {
         override val type = TYPE_REGISTER
     }
 
-    data class RegisterAck(val ok: Boolean, val message: String = "") : HubMessage() {
+    data class RegisterAck(
+        val ok: Boolean,
+        val message: String = "",
+        val turnConfig: TurnServerConfig? = null
+    ) : HubMessage() {
         override val type = TYPE_REGISTER_ACK
     }
 
@@ -44,7 +49,8 @@ sealed class HubMessage {
         val controlDeviceId: String,
         val remoteDeviceId: String,
         val controlName: String,
-        val remoteName: String
+        val remoteName: String,
+        val sessionId: String = ""
     ) : HubMessage() {
         override val type = TYPE_SESSION_BOUND
     }
@@ -135,6 +141,15 @@ class HubCodec(private val gson: Gson = Gson()) {
             is HubMessage.RegisterAck -> {
                 o.addProperty("ok", message.ok)
                 o.addProperty("message", message.message)
+                message.turnConfig?.let { turn ->
+                    val turnObj = JsonObject()
+                    val arr = JsonArray()
+                    turn.urls.forEach { arr.add(it) }
+                    turnObj.add("urls", arr)
+                    turnObj.addProperty("username", turn.username)
+                    turnObj.addProperty("credential", turn.credential)
+                    o.add("turn", turnObj)
+                }
             }
             is HubMessage.RemotesList -> {
                 val arr = JsonArray()
@@ -158,6 +173,7 @@ class HubCodec(private val gson: Gson = Gson()) {
                 o.addProperty("remoteDeviceId", message.remoteDeviceId)
                 o.addProperty("controlName", message.controlName)
                 o.addProperty("remoteName", message.remoteName)
+                o.addProperty("sessionId", message.sessionId)
             }
             is HubMessage.SessionUnbind -> {
                 o.addProperty("fromId", message.fromId)
@@ -207,10 +223,22 @@ class HubCodec(private val gson: Gson = Gson()) {
                 displayName = o.get("displayName").asString,
                 mode = o.get("mode").asString
             )
-            HubMessage.TYPE_REGISTER_ACK -> HubMessage.RegisterAck(
-                ok = o.get("ok").asBoolean,
-                message = o.get("message")?.asString.orEmpty()
-            )
+            HubMessage.TYPE_REGISTER_ACK -> {
+                val turnObj = o.getAsJsonObject("turn")
+                val turnConfig = turnObj?.let { t ->
+                    val urls = t.getAsJsonArray("urls")?.map { it.asString } ?: emptyList()
+                    TurnServerConfig(
+                        urls = urls,
+                        username = t.get("username")?.asString.orEmpty(),
+                        credential = t.get("credential")?.asString.orEmpty()
+                    )
+                }
+                HubMessage.RegisterAck(
+                    ok = o.get("ok").asBoolean,
+                    message = o.get("message")?.asString.orEmpty(),
+                    turnConfig = turnConfig
+                )
+            }
             HubMessage.TYPE_REMOTES_LIST -> {
                 val list = mutableListOf<HubDevice>()
                 o.getAsJsonArray("remotes")?.forEach { el ->
@@ -236,7 +264,8 @@ class HubCodec(private val gson: Gson = Gson()) {
                 controlDeviceId = o.get("controlDeviceId").asString,
                 remoteDeviceId = o.get("remoteDeviceId").asString,
                 controlName = o.get("controlName")?.asString ?: "Control",
-                remoteName = o.get("remoteName")?.asString ?: "Remote"
+                remoteName = o.get("remoteName")?.asString ?: "Remote",
+                sessionId = o.get("sessionId")?.asString.orEmpty()
             )
             HubMessage.TYPE_SESSION_UNBIND -> HubMessage.SessionUnbind(
                 fromId = o.get("fromId").asString,

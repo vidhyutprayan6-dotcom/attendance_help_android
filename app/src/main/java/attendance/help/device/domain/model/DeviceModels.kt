@@ -28,6 +28,32 @@ enum class SessionLinkState {
     ERROR
 }
 
+/** Authoritative remote-control session lifecycle (REMOTE side focus). */
+enum class RemoteSessionState {
+    DISCONNECTED,
+    CONNECTED,
+    WAITING,
+    REQUESTING_SCREEN_PERMISSION,
+    SCREEN_PERMISSION_GRANTED,
+    STARTING_STREAM,
+    STREAMING,
+    STOPPING,
+    ERROR
+}
+
+data class CaptureGeometry(
+    val sessionId: String = "",
+    val captureWidth: Int = 0,
+    val captureHeight: Int = 0,
+    val rotation: Int = 0
+)
+
+data class TurnServerConfig(
+    val urls: List<String> = emptyList(),
+    val username: String = "",
+    val credential: String = ""
+)
+
 data class DeviceIdentity(
     val deviceId: String,
     val displayName: String
@@ -67,5 +93,8 @@ data class AppLinkSnapshot(
     /** Remote must grant MediaProjection before Control can see/control its screen. */
     val needsScreenSharePermission: Boolean = false,
     val screenShareActive: Boolean = false,
-    val accessibilityEnabled: Boolean = false
+    val accessibilityEnabled: Boolean = false,
+    val remoteSessionState: RemoteSessionState = RemoteSessionState.DISCONNECTED,
+    val sessionId: String = "",
+    val captureGeometry: CaptureGeometry = CaptureGeometry()
 )

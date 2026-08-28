@@ -59,7 +59,9 @@
     <string name="open_accessibility_settings">Open Accessibility settings</string>
     <string name="refresh_accessibility">I enabled it — refresh</string>
     <string name="screen_share_required">Allow screen share so the Control phone can see and operate this device.</string>
-    <string name="allow_screen_share">Allow screen share</string>
+    <string name="allow_screen_share">Share screen</string>
+    <string name="start_screen_share">Start screen sharing</string>
+    <string name="stop_screen_share">Stop sharing</string>
     <string name="key_back">Back</string>
     <string name="key_home">Home</string>
     <string name="key_recents">Recents</string>

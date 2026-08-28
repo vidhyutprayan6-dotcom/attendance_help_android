@@ -104,4 +104,6 @@ dependencies {
     implementation(libs.stream.webrtc)
 
     implementation(libs.timber)
+
+    testImplementation("junit:junit:4.13.2")
 }

@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.Intent
 import attendance.help.device.BuildConfig
 import attendance.help.device.device.DeviceIdentityProvider
+import attendance.help.device.device.command.ControlMessages
 import attendance.help.device.device.command.CommandParser
 import attendance.help.device.device.command.CommandTypes
 import attendance.help.device.device.command.KeyCommand
@@ -11,14 +12,16 @@ import attendance.help.device.device.command.PingCommand
 import attendance.help.device.device.command.PongCommand
 import attendance.help.device.device.command.TouchCommand
 import attendance.help.device.device.control.RemoteInputAccessibilityService
-import attendance.help.device.device.control.ScreenCapturePermissionActivity
 import attendance.help.device.device.control.ScreenShareCoordinator
 import attendance.help.device.domain.model.AppLinkSnapshot
+import attendance.help.device.domain.model.CaptureGeometry
 import attendance.help.device.domain.model.DeviceMode
 import attendance.help.device.domain.model.DualCameraSessionState
 import attendance.help.device.domain.model.HubDevice
+import attendance.help.device.domain.model.RemoteSessionState
 import attendance.help.device.domain.model.ServerLinkState
 import attendance.help.device.domain.model.SessionLinkState
+import attendance.help.device.domain.model.TurnServerConfig
 import attendance.help.device.domain.repository.SessionRepository
 import attendance.help.device.network.hub.HubClient
 import attendance.help.device.network.hub.HubMessage
@@ -35,7 +38,11 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import com.google.gson.Gson
+import com.google.gson.JsonObject
 import org.webrtc.IceCandidate
 import org.webrtc.PeerConnection
 import org.webrtc.SessionDescription
@@ -58,11 +65,14 @@ class SessionController @Inject constructor(
     private val screenShareCoordinator: ScreenShareCoordinator
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private val sessionMutex = Mutex()
+    private val gson = Gson()
     private val localDeviceId by lazy { deviceIdentityProvider.getOrCreateDeviceId() }
 
     private var hubClient: HubClient? = null
     private var peerCreated = false
     private var boundPeerId: String? = null
+    private var activeSessionId: String = ""
 
     private var remoteRenderer: SurfaceViewRenderer? = null
     private var inboundScreenTrack: VideoTrack? = null
@@ -79,15 +89,17 @@ class SessionController @Inject constructor(
     val uiState: StateFlow<AppLinkSnapshot> = _ui.asStateFlow()
 
     init {
+        ScreenShareService.stopCallback = { scope.launch { stopRemoteScreenShare(fromNotification = true) } }
         startPresenceHeartbeat()
         scope.launch {
             screenShareCoordinator.permissionResults.collect { intent ->
                 runCatching { onScreenShareGranted(intent) }
                     .onFailure { error ->
-                        Timber.e(error, "Screen share setup failed")
+                        Timber.tag("REMOTE_SESSION").e(error, "Screen share setup failed")
                         ScreenShareService.stop(context)
                         update {
                             copy(
+                                remoteSessionState = RemoteSessionState.ERROR,
                                 needsScreenSharePermission = true,
                                 screenShareActive = false,
                                 statusMessage = context.getString(
@@ -125,12 +137,49 @@ class SessionController @Inject constructor(
     }
 
     fun requestScreenSharePermission() {
+        if (_ui.value.mode != DeviceMode.REMOTE) return
+        if (_ui.value.boundPeer == null) {
+            update { copy(statusMessage = "No Control connected yet") }
+            return
+        }
+        if (!RemoteInputAccessibilityService.isEnabled()) {
+            update {
+                copy(
+                    statusMessage = "Enable Accessibility first, then share screen",
+                    accessibilityEnabled = false
+                )
+            }
+            return
+        }
+        update { copy(remoteSessionState = RemoteSessionState.REQUESTING_SCREEN_PERMISSION) }
         val launched = screenShareCoordinator.requestScreenCapture()
         if (!launched) {
             update {
                 copy(
-                    statusMessage = "Open the app on the Remote phone, then tap Allow screen share again"
+                    remoteSessionState = RemoteSessionState.WAITING,
+                    statusMessage = "Return to this app, then tap Share screen again"
                 )
+            }
+        }
+    }
+
+    fun stopRemoteScreenShare(fromNotification: Boolean = false) {
+        scope.launch {
+            sessionMutex.withLock {
+                stopScreenLocally()
+                remoteScreenReady = false
+                update {
+                    copy(
+                        remoteSessionState = RemoteSessionState.WAITING,
+                        screenShareActive = false,
+                        needsScreenSharePermission = true,
+                        statusMessage = if (fromNotification) {
+                            "Screen sharing stopped from notification"
+                        } else {
+                            "Screen sharing stopped — tap Share screen to start again"
+                        }
+                    )
+                }
             }
         }
     }
@@ -173,14 +222,41 @@ class SessionController @Inject constructor(
         update { copy(accessibilityEnabled = RemoteInputAccessibilityService.isEnabled()) }
     }
 
-    fun sendTouch(action: String, x: Float, y: Float) {
+    fun sendTap(normalizedX: Float, normalizedY: Float) {
         if (_ui.value.mode != DeviceMode.CONTROL) return
-        peerConnectionManager.sendData(TouchCommand(action, x, y).toPayload())
+        if (!ControlMessages.isValidNormalized(normalizedX) || !ControlMessages.isValidNormalized(normalizedY)) return
+        peerConnectionManager.sendData(ControlMessages.encodeTap(normalizedX, normalizedY))
+    }
+
+    fun sendSwipe(points: List<Pair<Float, Float>>, durationMs: Long) {
+        if (_ui.value.mode != DeviceMode.CONTROL) return
+        val mapped = points.mapNotNull { (x, y) ->
+            if (ControlMessages.isValidNormalized(x) && ControlMessages.isValidNormalized(y)) {
+                ControlMessages.Point(x, y)
+            } else null
+        }
+        if (mapped.size < 2) return
+        peerConnectionManager.sendData(
+            ControlMessages.encodeSwipe(ControlMessages.downsample(mapped), durationMs)
+        )
     }
 
     fun sendRemoteKey(type: String) {
         if (_ui.value.mode != DeviceMode.CONTROL) return
+        val action = when (type) {
+            CommandTypes.KEY_BACK -> "BACK"
+            CommandTypes.KEY_HOME -> "HOME"
+            CommandTypes.KEY_RECENTS -> "RECENTS"
+            else -> return
+        }
+        peerConnectionManager.sendData(ControlMessages.encodeGlobalAction(action))
+        // Legacy fallback for older builds
         peerConnectionManager.sendData(KeyCommand(type).toPayload())
+    }
+
+    /** @deprecated use [sendTap] */
+    fun sendTouch(action: String, x: Float, y: Float) {
+        if (action == "up") sendTap(x, y)
     }
 
     /** Connect to PC/virtual hub only (phones never host the server). */
@@ -365,6 +441,7 @@ class SessionController @Inject constructor(
         remoteScreenReady = false
         clearPendingIce()
         sessionEpoch++
+        activeSessionId = ""
         sessionRepository.setSessionLinkState(
             if (_ui.value.mode == DeviceMode.REMOTE) {
                 SessionLinkState.WAITING_FOR_CONTROL
@@ -381,8 +458,15 @@ class SessionController @Inject constructor(
                     SessionLinkState.SELECTING_REMOTE
                 },
                 dualCamera = DualCameraSessionState(),
-                needsScreenSharePermission = mode == DeviceMode.REMOTE && boundPeerId != null,
+                needsScreenSharePermission = false,
                 screenShareActive = false,
+                remoteSessionState = if (mode == DeviceMode.REMOTE) {
+                    RemoteSessionState.WAITING
+                } else {
+                    RemoteSessionState.DISCONNECTED
+                },
+                sessionId = "",
+                captureGeometry = CaptureGeometry(),
                 statusMessage = message,
                 webrtcState = "CLOSED"
             )
@@ -507,6 +591,7 @@ class SessionController @Inject constructor(
             when (message) {
                 is HubMessage.RegisterAck -> {
                     update { copy(statusMessage = message.message.ifBlank { "Registered" }) }
+                    message.turnConfig?.let { peerConnectionManager.setTurnConfig(it) }
                 }
                 is HubMessage.RemotesList -> {
                     update {
@@ -517,41 +602,69 @@ class SessionController @Inject constructor(
                     }
                 }
                 is HubMessage.SessionBound -> {
-                    val iAmControl = message.controlDeviceId == localDeviceId
-                    val peer = if (iAmControl) {
-                        HubDevice(message.remoteDeviceId, message.remoteName, DeviceMode.REMOTE, false)
-                    } else {
-                        HubDevice(message.controlDeviceId, message.controlName, DeviceMode.CONTROL, false)
-                    }
-                    // Fresh WebRTC session for every bind.
-                    stopScreenLocally()
-                    peerConnectionManager.release()
-                    peerCreated = false
-                    inboundScreenTrack = null
-                    pendingOfferSdp = null
-                    pendingOfferFromId = null
-                    remoteScreenReady = false
-                    clearPendingIce()
-                    boundPeerId = peer.deviceId
-                    sessionRepository.setSessionLinkState(SessionLinkState.BOUND)
-                    update {
-                        copy(
-                            boundPeer = peer,
-                            sessionLinkState = SessionLinkState.BOUND,
-                            statusMessage = if (iAmControl) {
-                                "Connected — waiting for Remote screen share…"
+                    sessionMutex.withLock {
+                        val iAmControl = message.controlDeviceId == localDeviceId
+                        val peer = if (iAmControl) {
+                            HubDevice(message.remoteDeviceId, message.remoteName, DeviceMode.REMOTE, false)
+                        } else {
+                            HubDevice(message.controlDeviceId, message.controlName, DeviceMode.CONTROL, false)
+                        }
+                        activeSessionId = message.sessionId.ifBlank {
+                            "${message.controlDeviceId}_${message.remoteDeviceId}"
+                        }
+                        stopScreenLocally()
+                        peerConnectionManager.release()
+                        peerCreated = false
+                        inboundScreenTrack = null
+                        pendingOfferSdp = null
+                        pendingOfferFromId = null
+                        remoteScreenReady = false
+                        clearPendingIce()
+                        boundPeerId = null
+
+                        ensurePeer(isOfferer = iAmControl, force = true)
+                        if (!peerConnectionManager.hasPeerConnection()) {
+                            update {
+                                copy(
+                                    sessionLinkState = SessionLinkState.ERROR,
+                                    remoteSessionState = RemoteSessionState.ERROR,
+                                    statusMessage = "WebRTC setup failed — try disconnect and reconnect"
+                                )
+                            }
+                            return@withLock
+                        }
+
+                        boundPeerId = peer.deviceId
+                        sessionRepository.setSessionLinkState(SessionLinkState.BOUND)
+                        update {
+                            copy(
+                                boundPeer = peer,
+                                sessionId = activeSessionId,
+                                sessionLinkState = SessionLinkState.BOUND,
+                                remoteSessionState = if (iAmControl) {
+                                    RemoteSessionState.WAITING
+                                } else {
+                                    RemoteSessionState.WAITING
+                                },
+                                statusMessage = if (iAmControl) {
+                                    "Connected — waiting for Remote to share screen…"
+                                } else {
+                                    "Control connected — tap Share screen when ready"
+                                },
+                                needsScreenSharePermission = !iAmControl,
+                                screenShareActive = false,
+                                captureGeometry = CaptureGeometry(sessionId = activeSessionId),
+                                accessibilityEnabled = RemoteInputAccessibilityService.isEnabled()
+                            )
+                        }
+                        refreshStatusNotification(
+                            detail = if (iAmControl) {
+                                "Controlling ${peer.displayName}"
                             } else {
-                                "Control connected — allow screen share to be controlled"
-                            },
-                            needsScreenSharePermission = !iAmControl,
-                            screenShareActive = false,
-                            accessibilityEnabled = RemoteInputAccessibilityService.isEnabled()
+                                "Being controlled by ${peer.displayName}"
+                            }
                         )
                     }
-                    refreshStatusNotification(
-                        detail = if (iAmControl) "Controlling ${peer.displayName}" else "Being controlled by ${peer.displayName}"
-                    )
-                    ensurePeer(isOfferer = iAmControl, force = true)
                 }
                 is HubMessage.SessionUnbind -> Unit // client→server only
                 is HubMessage.SessionUnbound -> {
@@ -608,46 +721,89 @@ class SessionController @Inject constructor(
     }
 
     private suspend fun onScreenShareGranted(resultData: Intent) {
-        if (_ui.value.mode != DeviceMode.REMOTE) return
-        val peerId = boundPeerId ?: return
+        sessionMutex.withLock {
+            if (_ui.value.mode != DeviceMode.REMOTE) return
+            val peerId = boundPeerId ?: return
+            if (!peerConnectionManager.hasPeerConnection()) {
+                ensurePeer(isOfferer = false, force = true)
+            }
+            if (!peerConnectionManager.hasPeerConnection()) {
+                update {
+                    copy(
+                        remoteSessionState = RemoteSessionState.ERROR,
+                        needsScreenSharePermission = true,
+                        statusMessage = "Peer connection not ready — wait a moment and tap Share screen again"
+                    )
+                }
+                return
+            }
 
-        ensurePeer(isOfferer = false, force = false)
-
-        // Android 14+ requires media-projection FGS to be foreground BEFORE capture.
-        ScreenShareService.startAndAwait(context)
-        delay(250)
-
-        val shareResult = withContext(Dispatchers.Main) {
-            peerConnectionManager.startScreenShareSafely(Intent(resultData))
-        }
-
-        if (shareResult.isFailure) {
-            ScreenShareService.stop(context)
-            val message = shareResult.exceptionOrNull()?.message ?: "Screen capture failed"
             update {
                 copy(
-                    needsScreenSharePermission = true,
-                    screenShareActive = false,
-                    statusMessage = context.getString(
-                        attendance.help.device.R.string.screen_share_failed,
-                        message
-                    )
+                    remoteSessionState = RemoteSessionState.SCREEN_PERMISSION_GRANTED,
+                    statusMessage = "Starting screen share…"
                 )
             }
-            return
-        }
 
-        update {
-            copy(
-                needsScreenSharePermission = false,
-                screenShareActive = true,
-                statusMessage = "Screen sharing — Control can see and operate this phone",
-                accessibilityEnabled = RemoteInputAccessibilityService.isEnabled()
+            ScreenShareService.startAndAwait(context)
+            delay(300)
+
+            update { copy(remoteSessionState = RemoteSessionState.STARTING_STREAM) }
+
+            val shareResult = withContext(Dispatchers.Main) {
+                peerConnectionManager.startScreenShareSafely(Intent(resultData))
+            }
+
+            if (shareResult.isFailure) {
+                ScreenShareService.stop(context)
+                val message = shareResult.exceptionOrNull()?.message ?: "Screen capture failed"
+                update {
+                    copy(
+                        remoteSessionState = RemoteSessionState.ERROR,
+                        needsScreenSharePermission = true,
+                        screenShareActive = false,
+                        statusMessage = context.getString(
+                            attendance.help.device.R.string.screen_share_failed,
+                            message
+                        )
+                    )
+                }
+                return
+            }
+
+            val geom = CaptureGeometry(
+                sessionId = activeSessionId,
+                captureWidth = peerConnectionManager.captureWidth,
+                captureHeight = peerConnectionManager.captureHeight,
+                rotation = 0
             )
-        }
+            RemoteInputAccessibilityService.instance?.updateCaptureGeometry(
+                geom.captureWidth,
+                geom.captureHeight
+            )
+            peerConnectionManager.sendData(
+                ControlMessages.encodeCaptureGeometry(
+                    sessionId = activeSessionId,
+                    captureWidth = geom.captureWidth,
+                    captureHeight = geom.captureHeight,
+                    rotation = geom.rotation
+                )
+            )
 
-        hubClient?.send(HubMessage.ScreenReady(fromId = localDeviceId, toId = peerId))
-        tryAnswerPendingOffer()
+            update {
+                copy(
+                    remoteSessionState = RemoteSessionState.STREAMING,
+                    needsScreenSharePermission = false,
+                    screenShareActive = true,
+                    captureGeometry = geom,
+                    statusMessage = "Screen sharing — Control can see and operate this phone",
+                    accessibilityEnabled = RemoteInputAccessibilityService.isEnabled()
+                )
+            }
+
+            hubClient?.send(HubMessage.ScreenReady(fromId = localDeviceId, toId = peerId))
+            tryAnswerPendingOffer()
+        }
     }
 
     private fun tryAnswerPendingOffer() {
@@ -740,18 +896,104 @@ class SessionController @Inject constructor(
 
     private fun handleData(payload: String) {
         scope.launch {
-            when (CommandParser.typeOf(payload)) {
-                CommandTypes.OPEN_CAMERA,
-                CommandTypes.CLOSE_CAMERA -> Unit
-                CommandTypes.PING ->
-                    peerConnectionManager.sendData(PongCommand(localDeviceId).toPayload())
-                CommandTypes.PONG -> update { copy(statusMessage = "Peer alive (PONG)") }
-                CommandTypes.TOUCH -> handleIncomingTouch(payload)
-                CommandTypes.KEY_BACK,
-                CommandTypes.KEY_HOME,
-                CommandTypes.KEY_RECENTS -> handleIncomingKey(CommandParser.typeOf(payload)!!)
+            if (_ui.value.sessionLinkState != SessionLinkState.STREAMING &&
+                _ui.value.sessionLinkState != SessionLinkState.BOUND
+            ) {
+                return@launch
+            }
+            when (ControlMessages.parseType(payload)) {
+                ControlMessages.TAP -> handleControlTap(payload)
+                ControlMessages.SWIPE -> handleControlSwipe(payload)
+                ControlMessages.LONG_PRESS -> handleControlLongPress(payload)
+                ControlMessages.GLOBAL_ACTION -> handleControlGlobalAction(payload)
+                ControlMessages.SET_TEXT -> handleControlSetText(payload)
+                ControlMessages.CAPTURE_GEOMETRY -> handleCaptureGeometry(payload)
+                else -> handleLegacyData(payload)
             }
         }
+    }
+
+    private fun handleLegacyData(payload: String) {
+        when (CommandParser.typeOf(payload)) {
+            CommandTypes.OPEN_CAMERA,
+            CommandTypes.CLOSE_CAMERA -> Unit
+            CommandTypes.PING ->
+                peerConnectionManager.sendData(PongCommand(localDeviceId).toPayload())
+            CommandTypes.PONG -> update { copy(statusMessage = "Peer alive (PONG)") }
+            CommandTypes.TOUCH -> handleIncomingTouch(payload)
+            CommandTypes.KEY_BACK,
+            CommandTypes.KEY_HOME,
+            CommandTypes.KEY_RECENTS -> handleIncomingKey(CommandParser.typeOf(payload)!!)
+        }
+    }
+
+    private fun handleControlTap(payload: String) {
+        if (_ui.value.mode != DeviceMode.REMOTE) return
+        val obj = runCatching { gson.fromJson(payload, JsonObject::class.java) }.getOrNull() ?: return
+        val x = obj.get("x")?.asFloat ?: return
+        val y = obj.get("y")?.asFloat ?: return
+        if (!ControlMessages.isValidNormalized(x) || !ControlMessages.isValidNormalized(y)) return
+        val a11y = RemoteInputAccessibilityService.instance ?: return
+        a11y.tapNormalized(x, y)
+    }
+
+    private fun handleControlSwipe(payload: String) {
+        if (_ui.value.mode != DeviceMode.REMOTE) return
+        val obj = runCatching { gson.fromJson(payload, JsonObject::class.java) }.getOrNull() ?: return
+        val duration = obj.get("durationMs")?.asLong ?: 300L
+        val points = obj.getAsJsonArray("points")?.mapNotNull { el ->
+            val p = el.asJsonObject
+            val x = p.get("x")?.asFloat
+            val y = p.get("y")?.asFloat
+            if (x != null && y != null && ControlMessages.isValidNormalized(x) && ControlMessages.isValidNormalized(y)) {
+                x to y
+            } else null
+        } ?: return
+        RemoteInputAccessibilityService.instance?.swipeNormalizedPoints(points, duration)
+    }
+
+    private fun handleControlLongPress(payload: String) {
+        if (_ui.value.mode != DeviceMode.REMOTE) return
+        val obj = runCatching { gson.fromJson(payload, JsonObject::class.java) }.getOrNull() ?: return
+        val x = obj.get("x")?.asFloat ?: return
+        val y = obj.get("y")?.asFloat ?: return
+        val duration = obj.get("durationMs")?.asLong ?: 700L
+        RemoteInputAccessibilityService.instance?.longPressNormalized(x, y, duration)
+    }
+
+    private fun handleControlGlobalAction(payload: String) {
+        if (_ui.value.mode != DeviceMode.REMOTE) return
+        val action = runCatching {
+            gson.fromJson(payload, JsonObject::class.java).get("action")?.asString
+        }.getOrNull() ?: return
+        val a11y = RemoteInputAccessibilityService.instance ?: return
+        when (action) {
+            "BACK" -> a11y.pressBack()
+            "HOME" -> a11y.pressHome()
+            "RECENTS" -> a11y.pressRecents()
+        }
+    }
+
+    private fun handleControlSetText(payload: String) {
+        if (_ui.value.mode != DeviceMode.REMOTE) return
+        val text = runCatching {
+            gson.fromJson(payload, JsonObject::class.java).get("text")?.asString
+        }.getOrNull()?.take(512) ?: return
+        RemoteInputAccessibilityService.instance?.setTextOnFocusedField(text)
+    }
+
+    private fun handleCaptureGeometry(payload: String) {
+        if (_ui.value.mode != DeviceMode.CONTROL) return
+        val obj = runCatching { gson.fromJson(payload, JsonObject::class.java) }.getOrNull() ?: return
+        val sessionId = obj.get("sessionId")?.asString.orEmpty()
+        if (sessionId.isNotBlank() && activeSessionId.isNotBlank() && sessionId != activeSessionId) return
+        val geom = CaptureGeometry(
+            sessionId = sessionId,
+            captureWidth = obj.get("captureWidth")?.asInt ?: 0,
+            captureHeight = obj.get("captureHeight")?.asInt ?: 0,
+            rotation = obj.get("rotation")?.asInt ?: 0
+        )
+        update { copy(captureGeometry = geom) }
     }
 
     private fun handleIncomingTouch(payload: String) {

@@ -24,6 +24,7 @@ import org.webrtc.SurfaceViewRenderer
 import org.webrtc.VideoCapturer
 import org.webrtc.VideoSource
 import org.webrtc.VideoTrack
+import attendance.help.device.domain.model.TurnServerConfig
 import attendance.help.device.utils.DeviceHints
 import timber.log.Timber
 import java.nio.ByteBuffer
@@ -61,6 +62,18 @@ class PeerConnectionManager @Inject constructor(
     private var listeners: WebRtcListeners? = null
     private val mediaRunning = AtomicBoolean(false)
     private var sharingScreen = false
+    private var turnConfig: TurnServerConfig = TurnServerConfig()
+
+    var captureWidth: Int = 0
+        private set
+    var captureHeight: Int = 0
+        private set
+
+    fun hasPeerConnection(): Boolean = peerConnection != null
+
+    fun setTurnConfig(config: TurnServerConfig) {
+        turnConfig = config
+    }
 
     @Synchronized
     fun ensureInitialized() {
@@ -97,10 +110,7 @@ class PeerConnectionManager @Inject constructor(
         closePeerOnly()
         this.listeners = listeners
 
-        val iceServers = listOf(
-            PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer(),
-            PeerConnection.IceServer.builder("stun:stun1.l.google.com:19302").createIceServer()
-        )
+        val iceServers = buildIceServers()
         val rtcConfig = PeerConnection.RTCConfiguration(iceServers).apply {
             sdpSemantics = PeerConnection.SdpSemantics.UNIFIED_PLAN
             continualGatheringPolicy = PeerConnection.ContinualGatheringPolicy.GATHER_CONTINUALLY
@@ -136,11 +146,27 @@ class PeerConnectionManager @Inject constructor(
 
         if (isController) {
             dataChannel = peerConnection?.createDataChannel(
-                "commands",
+                "control",
                 DataChannel.Init().apply { ordered = true }
             )
             dataChannel?.let { attachDataChannel(it) }
         }
+    }
+
+    private fun buildIceServers(): List<PeerConnection.IceServer> {
+        val servers = mutableListOf(
+            PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer(),
+            PeerConnection.IceServer.builder("stun:stun1.l.google.com:19302").createIceServer()
+        )
+        turnConfig.urls.filter { it.isNotBlank() }.forEach { url ->
+            val builder = PeerConnection.IceServer.builder(url)
+            if (turnConfig.username.isNotBlank()) {
+                builder.setUsername(turnConfig.username)
+                builder.setPassword(turnConfig.credential)
+            }
+            servers.add(builder.createIceServer())
+        }
+        return servers
     }
 
     /**
@@ -219,6 +245,8 @@ class PeerConnectionManager @Inject constructor(
             setEnabled(true)
         }
         pc.addTrack(localVideoTrack, listOf("AH_STREAM"))
+        captureWidth = width
+        captureHeight = height
         mediaRunning.set(true)
     }
 
@@ -235,7 +263,9 @@ class PeerConnectionManager @Inject constructor(
         surfaceHelper?.dispose()
         surfaceHelper = null
         sharingScreen = false
-        Timber.i("Screen share stopped")
+        captureWidth = 0
+        captureHeight = 0
+        Timber.tag("SCREEN_CAPTURE").i("Screen share stopped")
     }
 
     fun createOffer(onSuccess: (SessionDescription) -> Unit, onError: (String) -> Unit) {

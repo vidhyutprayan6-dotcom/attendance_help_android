@@ -79,6 +79,7 @@
     <string name="display_rule">اتصال/قطع الخادم · بعيد/تحكم/بدون · عند الربط: تحكم بشاشة البعيد · البعيد المشغول لتحكم واحد فقط</string>
     <string name="screen_share_active">مشاركة الشاشة نشطة</string>
     <string name="waiting_remote_screen">في انتظار شاشة البعيد…</string>
+    <string name="screen_share_failed">فشلت مشاركة الشاشة: %1$s. اضغط السماح بمشاركة الشاشة للمحاولة مرة أخرى.</string>
 
     <string name="notif_channel_name">حالة الربط</string>
     <string name="notif_channel_desc">يعرض اتصال الخادم ووضع الهاتف في شريط الحالة</string>

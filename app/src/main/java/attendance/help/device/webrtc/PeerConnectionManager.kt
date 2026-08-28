@@ -24,7 +24,7 @@ import org.webrtc.SurfaceViewRenderer
 import org.webrtc.VideoCapturer
 import org.webrtc.VideoSource
 import org.webrtc.VideoTrack
-import timber.log.Timber
+import attendance.help.device.utils.DeviceHints
 import java.nio.ByteBuffer
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.Inject
@@ -69,7 +69,8 @@ class PeerConnectionManager @Inject constructor(
                 .setEnableInternalTracer(false)
                 .createInitializationOptions()
         )
-        val encoder = DefaultVideoEncoderFactory(eglBase.eglBaseContext, true, true)
+        val enableH264HighProfile = !DeviceHints.isProbablyEmulator()
+        val encoder = DefaultVideoEncoderFactory(eglBase.eglBaseContext, true, enableH264HighProfile)
         val decoder = DefaultVideoDecoderFactory(eglBase.eglBaseContext)
         factory = PeerConnectionFactory.builder()
             .setVideoEncoderFactory(encoder)
@@ -141,27 +142,67 @@ class PeerConnectionManager @Inject constructor(
         }
     }
 
+    /**
+     * Starts screen capture safely. Returns failure instead of crashing the process.
+     * Requires an active peer connection so the video track can be published.
+     */
     @Synchronized
-    fun startScreenShare(permissionResultData: Intent) {
-        ensureInitialized()
-        if (mediaRunning.get()) return
-        val capturer = ScreenCapturerAndroid(
-            permissionResultData,
-            object : MediaProjection.Callback() {
-                override fun onStop() {
-                    mainHandler.post { stopScreenShare() }
+    fun startScreenShareSafely(permissionResultData: Intent): Result<Unit> {
+        return runCatching {
+            ensureInitialized()
+            if (mediaRunning.get()) return Result.success(Unit)
+            val pc = peerConnection
+                ?: throw IllegalStateException("Peer connection not ready — stay on session screen and try again")
+            val capturer = ScreenCapturerAndroid(
+                permissionResultData,
+                object : MediaProjection.Callback() {
+                    override fun onStop() {
+                        mainHandler.post { stopScreenShare() }
+                    }
                 }
+            )
+            sharingScreen = true
+            val (w, h, fps) = captureDimensions()
+            beginScreenCapture(capturer, w, h, fps, pc)
+            Timber.i("Screen share started %dx%d@%dfps emulator=%s", w, h, fps, DeviceHints.isProbablyEmulator())
+        }.fold(
+            onSuccess = { Result.success(Unit) },
+            onFailure = { error ->
+                Timber.e(error, "startScreenShareSafely failed")
+                runCatching { stopScreenShare() }
+                Result.failure(error)
             }
         )
-        sharingScreen = true
-        val dm = context.resources.displayMetrics
-        val w = min(dm.widthPixels, 1280)
-        val h = min(dm.heightPixels, 720)
-        beginScreenCapture(capturer, w, h, 24)
-        Timber.i("Screen share started %dx%d", w, h)
     }
 
-    private fun beginScreenCapture(capturer: VideoCapturer, width: Int, height: Int, fps: Int) {
+    private fun captureDimensions(): Triple<Int, Int, Int> {
+        val dm = context.resources.displayMetrics
+        return if (DeviceHints.isProbablyEmulator()) {
+            Triple(640, 480, 15)
+        } else {
+            Triple(
+                even(min(dm.widthPixels, 1280)),
+                even(min(dm.heightPixels, 720)),
+                24
+            )
+        }
+    }
+
+    private fun even(value: Int): Int = value and 0xFFFFFFFE.toInt()
+
+    @Deprecated("Use startScreenShareSafely")
+    @Synchronized
+    fun startScreenShare(permissionResultData: Intent) {
+        startScreenShareSafely(permissionResultData).getOrThrow()
+    }
+
+    private fun beginScreenCapture(
+        capturer: VideoCapturer,
+        width: Int,
+        height: Int,
+        fps: Int,
+        pc: PeerConnection
+    ) {
         videoCapturer = capturer
         surfaceHelper = SurfaceTextureHelper.create("CaptureThread", eglBase.eglBaseContext)
         videoSource = factory!!.createVideoSource(capturer.isScreencast)
@@ -170,7 +211,7 @@ class PeerConnectionManager @Inject constructor(
         localVideoTrack = factory!!.createVideoTrack("AH_SCREEN", videoSource).apply {
             setEnabled(true)
         }
-        peerConnection?.addTrack(localVideoTrack, listOf("AH_STREAM"))
+        pc.addTrack(localVideoTrack, listOf("AH_STREAM"))
         mediaRunning.set(true)
     }
 

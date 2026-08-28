@@ -10,13 +10,23 @@ import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import attendance.help.device.R
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.withTimeout
+import timber.log.Timber
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Foreground service required while MediaProjection / screen share is active.
+ * Android 14+ requires this service to be in the foreground BEFORE capture starts.
  */
 class ScreenShareService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
+
+    override fun onCreate() {
+        super.onCreate()
+        ensureChannel()
+    }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         ensureChannel()
@@ -36,11 +46,19 @@ class ScreenShareService : Service() {
         } else {
             startForeground(NOTIF_ID, notification)
         }
+        foregroundReady.getAndSet(null)?.complete(Unit)
+        Timber.i("ScreenShareService foreground active")
         return START_STICKY
+    }
+
+    override fun onDestroy() {
+        foregroundReady.getAndSet(null)?.complete(Unit)
+        super.onDestroy()
     }
 
     private fun ensureChannel() {
         val mgr = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+        if (mgr.getNotificationChannel(CHANNEL_ID) != null) return
         val channel = NotificationChannel(
             CHANNEL_ID,
             getString(R.string.screen_share_channel_name),
@@ -54,6 +72,18 @@ class ScreenShareService : Service() {
     companion object {
         private const val CHANNEL_ID = "ah_screen_share"
         private const val NOTIF_ID = 4202
+        private val foregroundReady = AtomicReference<CompletableDeferred<Unit>?>(null)
+
+        /** Starts FGS and waits until [startForeground] has run (required before MediaProjection). */
+        suspend fun startAndAwait(context: Context) {
+            val deferred = CompletableDeferred<Unit>()
+            foregroundReady.set(deferred)
+            val intent = Intent(context, ScreenShareService::class.java)
+            context.startForegroundService(intent)
+            withTimeout(10_000) {
+                deferred.await()
+            }
+        }
 
         fun start(context: Context) {
             val intent = Intent(context, ScreenShareService::class.java)

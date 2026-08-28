@@ -1,7 +1,9 @@
 package attendance.help.device.presentation
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -37,6 +39,16 @@ class MainActivity : ComponentActivity() {
 
     private var startRoute by mutableStateOf<String?>(null)
 
+    private val screenCaptureLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == RESULT_OK && result.data != null) {
+            screenShareCoordinator.emitGranted(result.data!!)
+        } else {
+            screenShareCoordinator.emitDenied()
+        }
+    }
+
     private val notificationPermission = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { /* ongoing notification may still work as FGS on some OEMs */ }
@@ -45,6 +57,10 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         screenShareCoordinator.bindActivity(this)
+        screenShareCoordinator.setCaptureLauncher {
+            val mgr = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+            screenCaptureLauncher.launch(mgr.createScreenCaptureIntent())
+        }
         maybeRequestNotificationPermission()
         sessionController.restoreStatusBarIfNeeded()
 
@@ -71,10 +87,15 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         screenShareCoordinator.bindActivity(this)
+        screenShareCoordinator.setCaptureLauncher {
+            val mgr = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+            screenCaptureLauncher.launch(mgr.createScreenCaptureIntent())
+        }
         sessionController.announcePresence()
     }
 
     override fun onDestroy() {
+        screenShareCoordinator.clearCaptureLauncher()
         screenShareCoordinator.unbindActivity(this)
         super.onDestroy()
     }

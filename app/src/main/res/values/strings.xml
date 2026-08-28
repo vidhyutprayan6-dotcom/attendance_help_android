@@ -80,6 +80,7 @@
     <string name="display_rule">Server connect/disconnect · Remote/Control/Nothing · When bound: full remote screen control · Busy remote is exclusive</string>
     <string name="screen_share_active">Screen share is active</string>
     <string name="waiting_remote_screen">Waiting for Remote screen…</string>
+    <string name="screen_share_failed">Screen share failed: %1$s. Tap Allow screen share to try again.</string>
 
     <string name="notif_channel_name">Link status</string>
     <string name="notif_channel_desc">Shows server connection and phone mode in the status bar</string>

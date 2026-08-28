@@ -10,8 +10,8 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * Delivers MediaProjection permission result and holds the foreground Activity
- * needed to launch the system screen-capture dialog reliably.
+ * Delivers MediaProjection permission results.
+ * The system dialog is launched from [MainActivity] (stable foreground Activity).
  */
 @Singleton
 class ScreenShareCoordinator @Inject constructor() {
@@ -24,6 +24,9 @@ class ScreenShareCoordinator @Inject constructor() {
     @Volatile
     private var activityRef: WeakReference<Activity>? = null
 
+    @Volatile
+    private var captureLauncher: (() -> Unit)? = null
+
     fun bindActivity(activity: Activity) {
         activityRef = WeakReference(activity)
     }
@@ -34,17 +37,27 @@ class ScreenShareCoordinator @Inject constructor() {
         }
     }
 
+    fun setCaptureLauncher(launcher: () -> Unit) {
+        captureLauncher = launcher
+    }
+
+    fun clearCaptureLauncher() {
+        captureLauncher = null
+    }
+
     fun requestScreenCapture(): Boolean {
-        val activity = activityRef?.get()
-        if (activity == null) {
-            return false
+        val launcher = captureLauncher
+        if (launcher != null) {
+            launcher.invoke()
+            return true
         }
+        val activity = activityRef?.get() ?: return false
         activity.startActivity(ScreenCapturePermissionActivity.intent(activity))
         return true
     }
 
     fun emitGranted(resultData: Intent) {
-        _permissionResults.tryEmit(resultData)
+        _permissionResults.tryEmit(Intent(resultData))
     }
 
     fun emitDenied() {

@@ -33,6 +33,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.webrtc.IceCandidate
@@ -81,7 +82,21 @@ class SessionController @Inject constructor(
         startPresenceHeartbeat()
         scope.launch {
             screenShareCoordinator.permissionResults.collect { intent ->
-                onScreenShareGranted(intent)
+                runCatching { onScreenShareGranted(intent) }
+                    .onFailure { error ->
+                        Timber.e(error, "Screen share setup failed")
+                        ScreenShareService.stop(context)
+                        update {
+                            copy(
+                                needsScreenSharePermission = true,
+                                screenShareActive = false,
+                                statusMessage = context.getString(
+                                    attendance.help.device.R.string.screen_share_failed,
+                                    error.message ?: "unknown error"
+                                )
+                            )
+                        }
+                    }
             }
         }
         scope.launch {
@@ -595,19 +610,42 @@ class SessionController @Inject constructor(
     private suspend fun onScreenShareGranted(resultData: Intent) {
         if (_ui.value.mode != DeviceMode.REMOTE) return
         val peerId = boundPeerId ?: return
+
         ensurePeer(isOfferer = false, force = false)
-        withContext(Dispatchers.Main) {
-            ScreenShareService.start(context)
-            peerConnectionManager.startScreenShare(resultData)
+
+        // Android 14+ requires media-projection FGS to be foreground BEFORE capture.
+        ScreenShareService.startAndAwait(context)
+        delay(250)
+
+        val shareResult = withContext(Dispatchers.Main) {
+            peerConnectionManager.startScreenShareSafely(Intent(resultData))
+        }
+
+        if (shareResult.isFailure) {
+            ScreenShareService.stop(context)
+            val message = shareResult.exceptionOrNull()?.message ?: "Screen capture failed"
             update {
                 copy(
-                    needsScreenSharePermission = false,
-                    screenShareActive = true,
-                    statusMessage = "Screen sharing — Control can see and operate this phone",
-                    accessibilityEnabled = RemoteInputAccessibilityService.isEnabled()
+                    needsScreenSharePermission = true,
+                    screenShareActive = false,
+                    statusMessage = context.getString(
+                        attendance.help.device.R.string.screen_share_failed,
+                        message
+                    )
                 )
             }
+            return
         }
+
+        update {
+            copy(
+                needsScreenSharePermission = false,
+                screenShareActive = true,
+                statusMessage = "Screen sharing — Control can see and operate this phone",
+                accessibilityEnabled = RemoteInputAccessibilityService.isEnabled()
+            )
+        }
+
         hubClient?.send(HubMessage.ScreenReady(fromId = localDeviceId, toId = peerId))
         tryAnswerPendingOffer()
     }

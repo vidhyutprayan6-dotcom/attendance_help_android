@@ -25,6 +25,7 @@ import org.webrtc.VideoCapturer
 import org.webrtc.VideoSource
 import org.webrtc.VideoTrack
 import attendance.help.device.utils.DeviceHints
+import timber.log.Timber
 import java.nio.ByteBuffer
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.Inject
@@ -148,31 +149,37 @@ class PeerConnectionManager @Inject constructor(
      */
     @Synchronized
     fun startScreenShareSafely(permissionResultData: Intent): Result<Unit> {
-        return runCatching {
+        return try {
             ensureInitialized()
-            if (mediaRunning.get()) return Result.success(Unit)
-            val pc = peerConnection
-                ?: throw IllegalStateException("Peer connection not ready — stay on session screen and try again")
-            val capturer = ScreenCapturerAndroid(
-                permissionResultData,
-                object : MediaProjection.Callback() {
-                    override fun onStop() {
-                        mainHandler.post { stopScreenShare() }
+            if (mediaRunning.get()) {
+                Result.success(Unit)
+            } else {
+                val pc = peerConnection
+                    ?: throw IllegalStateException(
+                        "Peer connection not ready — stay on session screen and try again"
+                    )
+                val capturer = ScreenCapturerAndroid(
+                    permissionResultData,
+                    object : MediaProjection.Callback() {
+                        override fun onStop() {
+                            mainHandler.post { stopScreenShare() }
+                        }
                     }
-                }
-            )
-            sharingScreen = true
-            val (w, h, fps) = captureDimensions()
-            beginScreenCapture(capturer, w, h, fps, pc)
-            Timber.i("Screen share started %dx%d@%dfps emulator=%s", w, h, fps, DeviceHints.isProbablyEmulator())
-        }.fold(
-            onSuccess = { Result.success(Unit) },
-            onFailure = { error ->
-                Timber.e(error, "startScreenShareSafely failed")
-                runCatching { stopScreenShare() }
-                Result.failure(error)
+                )
+                sharingScreen = true
+                val (w, h, fps) = captureDimensions()
+                beginScreenCapture(capturer, w, h, fps, pc)
+                Timber.i(
+                    "Screen share started %dx%d@%dfps emulator=%s",
+                    w, h, fps, DeviceHints.isProbablyEmulator()
+                )
+                Result.success(Unit)
             }
-        )
+        } catch (error: Throwable) {
+            Timber.e(error, "startScreenShareSafely failed")
+            runCatching { stopScreenShare() }
+            Result.failure(error)
+        }
     }
 
     private fun captureDimensions(): Triple<Int, Int, Int> {

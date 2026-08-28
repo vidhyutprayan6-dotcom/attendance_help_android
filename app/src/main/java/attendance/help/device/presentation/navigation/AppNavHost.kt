@@ -118,8 +118,8 @@ fun AppNavHost(startDestination: String) {
             SessionScreen(
                 state = state,
                 mode = vm.mode,
-                onBindRenderers = vm::bindRenderers,
-                onUnbindRenderers = vm::unbindRenderers,
+                onBindRenderer = vm::bindRenderer,
+                onUnbindRenderer = vm::unbindRenderer,
                 onReleaseRemote = {
                     vm.releaseRemote()
                     navController.popBackStack()
@@ -128,8 +128,6 @@ fun AppNavHost(startDestination: String) {
                 onRefreshAccessibility = vm::refreshAccessibility,
                 onTouch = vm::sendTouch,
                 onRemoteKey = vm::sendRemoteKey,
-                onStartRemotePhysicalCamera = vm::startRemotePhysicalCamera,
-                onStopRemotePhysicalCamera = vm::stopRemotePhysicalCamera,
                 onBack = { navController.popBackStack() }
             )
         }

@@ -6,9 +6,6 @@ import android.media.projection.MediaProjection
 import android.os.Handler
 import android.os.Looper
 import dagger.hilt.android.qualifiers.ApplicationContext
-import org.webrtc.AudioSource
-import org.webrtc.AudioTrack
-import org.webrtc.Camera2Enumerator
 import org.webrtc.DataChannel
 import org.webrtc.DefaultVideoDecoderFactory
 import org.webrtc.DefaultVideoEncoderFactory
@@ -32,6 +29,7 @@ import java.nio.ByteBuffer
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlin.math.min
 
 data class WebRtcListeners(
     val onIceCandidate: (IceCandidate) -> Unit,
@@ -41,11 +39,9 @@ data class WebRtcListeners(
 )
 
 /**
- * WebRTC peer + local capture (camera or screen) + command data channel.
- *
- * Full control mode:
- * - Control publishes front camera (face) → Remote displays it.
- * - Remote publishes screen → Control displays it and sends touches.
+ * WebRTC peer for screen-share remote control:
+ * - Remote publishes screen video (no audio).
+ * - Control receives screen and sends touch commands via data channel.
  */
 @Singleton
 class PeerConnectionManager @Inject constructor(
@@ -60,8 +56,6 @@ class PeerConnectionManager @Inject constructor(
     private var surfaceHelper: SurfaceTextureHelper? = null
     private var videoSource: VideoSource? = null
     private var localVideoTrack: VideoTrack? = null
-    private var audioSource: AudioSource? = null
-    private var localAudioTrack: AudioTrack? = null
     private var dataChannel: DataChannel? = null
     private var listeners: WebRtcListeners? = null
     private val mediaRunning = AtomicBoolean(false)
@@ -84,14 +78,7 @@ class PeerConnectionManager @Inject constructor(
         Timber.i("PeerConnectionFactory ready")
     }
 
-    fun initLocalRenderer(renderer: SurfaceViewRenderer) {
-        ensureInitialized()
-        renderer.init(eglBase.eglBaseContext, null)
-        renderer.setMirror(!sharingScreen)
-        renderer.setEnableHardwareScaler(true)
-    }
-
-    fun initRemoteRenderer(renderer: SurfaceViewRenderer) {
+    fun initRenderer(renderer: SurfaceViewRenderer) {
         ensureInitialized()
         renderer.init(eglBase.eglBaseContext, null)
         renderer.setMirror(false)
@@ -130,13 +117,13 @@ class PeerConnectionManager @Inject constructor(
             override fun onAddStream(stream: MediaStream) = Unit
             override fun onRemoveStream(stream: MediaStream) = Unit
             override fun onDataChannel(dc: DataChannel) {
-                Timber.i("Remote data channel received")
                 attachDataChannel(dc)
             }
             override fun onRenegotiationNeeded() = Unit
             override fun onAddTrack(receiver: RtpReceiver, mediaStreams: Array<out MediaStream>) {
                 val track = receiver.track()
                 if (track is VideoTrack) {
+                    track.setEnabled(true)
                     listeners.onRemoteVideoTrack(track)
                 }
             }
@@ -154,27 +141,6 @@ class PeerConnectionManager @Inject constructor(
         }
     }
 
-    fun attachLocalVideoTo(renderer: SurfaceViewRenderer) {
-        localVideoTrack?.addSink(renderer)
-    }
-
-    fun detachLocalVideoFrom(renderer: SurfaceViewRenderer) {
-        localVideoTrack?.removeSink(renderer)
-    }
-
-    @Synchronized
-    fun startCamera(preferFront: Boolean = true) {
-        ensureInitialized()
-        if (mediaRunning.get()) return
-        val capturer = createFrontCapturer(preferFront) ?: run {
-            Timber.e("No camera available")
-            return
-        }
-        sharingScreen = false
-        beginCapture(capturer, width = 1280, height = 720, fps = 30)
-        Timber.i("Local camera started")
-    }
-
     @Synchronized
     fun startScreenShare(permissionResultData: Intent) {
         ensureInitialized()
@@ -183,37 +149,33 @@ class PeerConnectionManager @Inject constructor(
             permissionResultData,
             object : MediaProjection.Callback() {
                 override fun onStop() {
-                    Timber.w("MediaProjection stopped by system")
-                    mainHandler.post { stopCamera() }
+                    mainHandler.post { stopScreenShare() }
                 }
             }
         )
         sharingScreen = true
         val dm = context.resources.displayMetrics
-        beginCapture(capturer, width = dm.widthPixels, height = dm.heightPixels, fps = 30)
-        Timber.i("Screen share started")
+        val w = min(dm.widthPixels, 1280)
+        val h = min(dm.heightPixels, 720)
+        beginScreenCapture(capturer, w, h, 24)
+        Timber.i("Screen share started %dx%d", w, h)
     }
 
-    private fun beginCapture(capturer: VideoCapturer, width: Int, height: Int, fps: Int) {
+    private fun beginScreenCapture(capturer: VideoCapturer, width: Int, height: Int, fps: Int) {
         videoCapturer = capturer
         surfaceHelper = SurfaceTextureHelper.create("CaptureThread", eglBase.eglBaseContext)
         videoSource = factory!!.createVideoSource(capturer.isScreencast)
         capturer.initialize(surfaceHelper, context, videoSource!!.capturerObserver)
         capturer.startCapture(width, height, fps)
-        localVideoTrack = factory!!.createVideoTrack("AH_VIDEO", videoSource).apply {
-            setEnabled(true)
-        }
-        audioSource = factory!!.createAudioSource(MediaConstraints())
-        localAudioTrack = factory!!.createAudioTrack("AH_AUDIO", audioSource).apply {
+        localVideoTrack = factory!!.createVideoTrack("AH_SCREEN", videoSource).apply {
             setEnabled(true)
         }
         peerConnection?.addTrack(localVideoTrack, listOf("AH_STREAM"))
-        peerConnection?.addTrack(localAudioTrack, listOf("AH_STREAM"))
         mediaRunning.set(true)
     }
 
     @Synchronized
-    fun stopCamera() {
+    fun stopScreenShare() {
         if (!mediaRunning.getAndSet(false)) return
         runCatching { videoCapturer?.stopCapture() }
         runCatching { videoCapturer?.dispose() }
@@ -224,18 +186,14 @@ class PeerConnectionManager @Inject constructor(
         videoSource = null
         surfaceHelper?.dispose()
         surfaceHelper = null
-        localAudioTrack?.dispose()
-        localAudioTrack = null
-        audioSource?.dispose()
-        audioSource = null
         sharingScreen = false
-        Timber.i("Local media stopped")
+        Timber.i("Screen share stopped")
     }
 
     fun createOffer(onSuccess: (SessionDescription) -> Unit, onError: (String) -> Unit) {
         val constraints = MediaConstraints().apply {
             mandatory.add(MediaConstraints.KeyValuePair("OfferToReceiveVideo", "true"))
-            mandatory.add(MediaConstraints.KeyValuePair("OfferToReceiveAudio", "true"))
+            mandatory.add(MediaConstraints.KeyValuePair("OfferToReceiveAudio", "false"))
         }
         peerConnection?.createOffer(sdpObserver("offer", onSuccess, onError) { sdp ->
             peerConnection?.setLocalDescription(simpleSdpObserver(), sdp)
@@ -244,8 +202,8 @@ class PeerConnectionManager @Inject constructor(
 
     fun createAnswer(onSuccess: (SessionDescription) -> Unit, onError: (String) -> Unit) {
         val constraints = MediaConstraints().apply {
-            mandatory.add(MediaConstraints.KeyValuePair("OfferToReceiveVideo", "true"))
-            mandatory.add(MediaConstraints.KeyValuePair("OfferToReceiveAudio", "true"))
+            mandatory.add(MediaConstraints.KeyValuePair("OfferToReceiveVideo", "false"))
+            mandatory.add(MediaConstraints.KeyValuePair("OfferToReceiveAudio", "false"))
         }
         peerConnection?.createAnswer(sdpObserver("answer", onSuccess, onError) { sdp ->
             peerConnection?.setLocalDescription(simpleSdpObserver(), sdp)
@@ -267,31 +225,24 @@ class PeerConnectionManager @Inject constructor(
             pc.addIceCandidate(candidate)
             true
         }.getOrElse {
-            Timber.w("ICE candidate queued/failed: %s", it.message)
+            Timber.w("ICE add failed: %s", it.message)
             false
         }
     }
 
     fun sendData(message: String) {
         val channel = dataChannel ?: return
-        if (channel.state() != DataChannel.State.OPEN) {
-            Timber.w("Data channel not open")
-            return
-        }
+        if (channel.state() != DataChannel.State.OPEN) return
         val buffer = DataChannel.Buffer(ByteBuffer.wrap(message.toByteArray(Charsets.UTF_8)), false)
         channel.send(buffer)
     }
 
-    fun isCameraRunning(): Boolean = mediaRunning.get()
     fun isScreenSharing(): Boolean = sharingScreen && mediaRunning.get()
-    /** True when local video (camera or screen) is being published to the peer. */
     fun isLocalMediaPublishing(): Boolean = mediaRunning.get()
-
-    fun hasPeerConnection(): Boolean = peerConnection != null
 
     @Synchronized
     fun release() {
-        stopCamera()
+        stopScreenShare()
         closePeerOnly()
     }
 
@@ -307,9 +258,7 @@ class PeerConnectionManager @Inject constructor(
         dataChannel = channel
         channel.registerObserver(object : DataChannel.Observer {
             override fun onBufferedAmountChange(previousAmount: Long) = Unit
-            override fun onStateChange() {
-                Timber.i("DataChannel state=%s", channel.state())
-            }
+            override fun onStateChange() = Unit
             override fun onMessage(buffer: DataChannel.Buffer) {
                 val data = ByteArray(buffer.data.remaining())
                 buffer.data.get(data)
@@ -317,17 +266,6 @@ class PeerConnectionManager @Inject constructor(
                 mainHandler.post { listeners?.onDataMessage(text) }
             }
         })
-    }
-
-    private fun createFrontCapturer(preferFront: Boolean): VideoCapturer? {
-        val enumerator = Camera2Enumerator(context)
-        val deviceNames = enumerator.deviceNames
-        val preferred = deviceNames.firstOrNull {
-            if (preferFront) enumerator.isFrontFacing(it) else enumerator.isBackFacing(it)
-        }
-        val fallback = deviceNames.firstOrNull()
-        val name = preferred ?: fallback ?: return null
-        return enumerator.createCapturer(name, null)
     }
 
     private fun sdpObserver(

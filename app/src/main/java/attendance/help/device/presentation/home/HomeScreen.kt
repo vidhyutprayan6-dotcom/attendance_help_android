@@ -86,10 +86,21 @@ fun HomeScreen(
             }
         )
         if (state.mode == DeviceMode.REMOTE) {
-            Text(stringResource(R.string.waiting_as_remote))
+            if (state.boundPeer != null) {
+                Text(
+                    text = "${stringResource(R.string.bound_with)}: ${state.boundPeer.displayName}",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.primary
+                )
+            } else {
+                Text(stringResource(R.string.waiting_as_remote))
+            }
         }
-        state.boundPeer?.let {
-            Text("${stringResource(R.string.bound_with)}: ${it.displayName}")
+        if (state.mode == DeviceMode.CONTROL && state.boundPeer != null) {
+            Text(
+                text = "${stringResource(R.string.bound_with)}: ${state.boundPeer.displayName}",
+                style = MaterialTheme.typography.titleMedium
+            )
         }
         if (state.statusMessage.isNotBlank()) {
             Text(state.statusMessage, style = MaterialTheme.typography.bodyMedium)

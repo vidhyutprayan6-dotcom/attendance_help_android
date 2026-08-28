@@ -43,8 +43,8 @@
     <string name="device_id_label">معرّف الجهاز</string>
     <string name="bound_with">متصل مع</string>
     <string name="control_title">التحكم عن بُعد</string>
-    <string name="control_hint_control">بث الكاميرا يعرض وجهك على الهاتفين. أسفل: شاشة البعيد — المسها للتحكم الكامل.</string>
-    <string name="control_hint_remote">بث الكاميرا يعرض مستخدم التحكم. اسمح بمشاركة الشاشة وإمكانية الوصول للتحكم الكامل.</string>
+    <string name="control_hint_control">انتظر شاشة البعيد أدناه، ثم المس للتحكم. استخدم رجوع / الرئيسية / التطبيقات الأخيرة.</string>
+    <string name="control_hint_remote">جهاز التحكم متصل. اسمح بمشاركة الشاشة وفعّل إمكانية الوصول للتحكم الكامل.</string>
     <string name="release_remote">قطع الاتصال بهذا الهاتف البعيد</string>
     <string name="release_from_control">قطع الاتصال بهاتف التحكم</string>
     <string name="session_main_feed">شاشة البعيد — المس للتحكم</string>
@@ -76,7 +76,9 @@
 
     <string name="permission_camera_required">يلزم إذن الكاميرا والميكروفون.</string>
     <string name="grant_permissions">منح الأذونات</string>
-    <string name="display_rule">اتصال/قطع الخادم · بعيد/تحكم/بدون · عند الربط: تحكم كامل · الكاميرتان تعملان → فيديو التحكم على الاثنين · البعيد المشغول لتحكم واحد فقط</string>
+    <string name="display_rule">اتصال/قطع الخادم · بعيد/تحكم/بدون · عند الربط: تحكم بشاشة البعيد · البعيد المشغول لتحكم واحد فقط</string>
+    <string name="screen_share_active">مشاركة الشاشة نشطة</string>
+    <string name="waiting_remote_screen">في انتظار شاشة البعيد…</string>
 
     <string name="notif_channel_name">حالة الربط</string>
     <string name="notif_channel_desc">يعرض اتصال الخادم ووضع الهاتف في شريط الحالة</string>

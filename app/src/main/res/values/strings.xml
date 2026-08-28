@@ -44,8 +44,8 @@
     <string name="device_id_label">Device ID</string>
     <string name="bound_with">Connected with</string>
     <string name="control_title">Remote control</string>
-    <string name="control_hint_control">Camera feed shows your face on both phones. Wait for Remote screen below, then touch to control.</string>
-    <string name="control_hint_remote">Camera feed shows the Control user. Allow screen share and Accessibility so this phone can be fully controlled.</string>
+    <string name="control_hint_control">Wait for the Remote screen below, then touch to control. Use Back / Home / Recents as needed.</string>
+    <string name="control_hint_remote">Control is connected. Allow screen share and enable Accessibility so this phone can be fully controlled.</string>
     <string name="release_remote">Disconnect from this remote</string>
     <string name="release_from_control">Disconnect from Control</string>
     <string name="session_main_feed">Remote screen — touch to control</string>
@@ -77,7 +77,9 @@
 
     <string name="permission_camera_required">Camera and microphone are required.</string>
     <string name="grant_permissions">Grant permissions</string>
-    <string name="display_rule">Server connect/disconnect · Remote/Control/Nothing · When bound: full remote control · Both cameras on → Control video on both · Busy remote is exclusive</string>
+    <string name="display_rule">Server connect/disconnect · Remote/Control/Nothing · When bound: full remote screen control · Busy remote is exclusive</string>
+    <string name="screen_share_active">Screen share is active</string>
+    <string name="waiting_remote_screen">Waiting for Remote screen…</string>
 
     <string name="notif_channel_name">Link status</string>
     <string name="notif_channel_desc">Shows server connection and phone mode in the status bar</string>

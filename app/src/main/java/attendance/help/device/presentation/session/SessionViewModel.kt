@@ -1,9 +1,7 @@
 package attendance.help.device.presentation.session
 
-import androidx.camera.view.PreviewView
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import attendance.help.device.camera.RemotePhysicalCamera
 import attendance.help.device.domain.model.AppLinkSnapshot
 import attendance.help.device.domain.model.DeviceMode
 import attendance.help.device.webrtc.SessionController
@@ -11,14 +9,12 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.stateIn
-import kotlinx.coroutines.launch
 import org.webrtc.SurfaceViewRenderer
 import javax.inject.Inject
 
 @HiltViewModel
 class SessionViewModel @Inject constructor(
-    private val sessionController: SessionController,
-    private val remotePhysicalCamera: RemotePhysicalCamera
+    private val sessionController: SessionController
 ) : ViewModel() {
 
     val ui: StateFlow<AppLinkSnapshot> = sessionController.uiState.stateIn(
@@ -29,11 +25,11 @@ class SessionViewModel @Inject constructor(
 
     val mode: DeviceMode get() = ui.value.mode
 
-    fun bindRenderers(remote: SurfaceViewRenderer?, localCameraFeed: SurfaceViewRenderer?) {
-        sessionController.bindRenderers(remote, localCameraFeed)
+    fun bindRenderer(renderer: SurfaceViewRenderer?) {
+        sessionController.bindRenderer(renderer)
     }
 
-    fun unbindRenderers() = sessionController.unbindRenderers()
+    fun unbindRenderer() = sessionController.unbindRenderer()
 
     fun releaseRemote() = sessionController.releaseRemoteControl()
 
@@ -45,17 +41,4 @@ class SessionViewModel @Inject constructor(
         sessionController.sendTouch(action, x, y)
 
     fun sendRemoteKey(type: String) = sessionController.sendRemoteKey(type)
-
-    fun startRemotePhysicalCamera(previewView: PreviewView, lifecycleOwner: androidx.lifecycle.LifecycleOwner) {
-        viewModelScope.launch {
-            remotePhysicalCamera.start(lifecycleOwner, previewView)
-        }
-    }
-
-    fun stopRemotePhysicalCamera() = remotePhysicalCamera.stop()
-
-    override fun onCleared() {
-        remotePhysicalCamera.stop()
-        super.onCleared()
-    }
 }

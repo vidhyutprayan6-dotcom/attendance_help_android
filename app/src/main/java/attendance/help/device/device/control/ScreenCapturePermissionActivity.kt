@@ -33,7 +33,9 @@ class ScreenCapturePermissionActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val mgr = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-        launcher.launch(mgr.createScreenCaptureIntent())
+        val captureIntent = mgr.createScreenCaptureIntent()
+        // Post avoids rare crashes when launching MediaProjection from a fresh Activity.
+        window.decorView.post { launcher.launch(captureIntent) }
     }
 
     companion object {

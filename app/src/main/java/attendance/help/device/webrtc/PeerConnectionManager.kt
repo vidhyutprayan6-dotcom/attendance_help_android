@@ -1,13 +1,14 @@
 package attendance.help.device.webrtc
 
 import android.content.Context
+import android.content.Intent
+import android.media.projection.MediaProjection
 import android.os.Handler
 import android.os.Looper
 import dagger.hilt.android.qualifiers.ApplicationContext
 import org.webrtc.AudioSource
 import org.webrtc.AudioTrack
 import org.webrtc.Camera2Enumerator
-import org.webrtc.CameraVideoCapturer
 import org.webrtc.DataChannel
 import org.webrtc.DefaultVideoDecoderFactory
 import org.webrtc.DefaultVideoEncoderFactory
@@ -18,10 +19,12 @@ import org.webrtc.MediaStream
 import org.webrtc.PeerConnection
 import org.webrtc.PeerConnectionFactory
 import org.webrtc.RtpReceiver
+import org.webrtc.ScreenCapturerAndroid
 import org.webrtc.SdpObserver
 import org.webrtc.SessionDescription
 import org.webrtc.SurfaceTextureHelper
 import org.webrtc.SurfaceViewRenderer
+import org.webrtc.VideoCapturer
 import org.webrtc.VideoSource
 import org.webrtc.VideoTrack
 import timber.log.Timber
@@ -38,12 +41,11 @@ data class WebRtcListeners(
 )
 
 /**
- * WebRTC peer + front camera capture + data channel.
+ * WebRTC peer + local capture (camera or screen) + command data channel.
  *
- * Display rules:
- * - Controller binds local VideoTrack to local renderer.
- * - Remote binds remote VideoTrack (controller face) to remote renderer.
- * - Both sides still start the local camera when dual session is active.
+ * Full control mode:
+ * - Control publishes front camera (face) → Remote displays it.
+ * - Remote publishes screen → Control displays it and sends touches.
  */
 @Singleton
 class PeerConnectionManager @Inject constructor(
@@ -54,7 +56,7 @@ class PeerConnectionManager @Inject constructor(
     private val mainHandler = Handler(Looper.getMainLooper())
     private var factory: PeerConnectionFactory? = null
     private var peerConnection: PeerConnection? = null
-    private var videoCapturer: CameraVideoCapturer? = null
+    private var videoCapturer: VideoCapturer? = null
     private var surfaceHelper: SurfaceTextureHelper? = null
     private var videoSource: VideoSource? = null
     private var localVideoTrack: VideoTrack? = null
@@ -62,7 +64,8 @@ class PeerConnectionManager @Inject constructor(
     private var localAudioTrack: AudioTrack? = null
     private var dataChannel: DataChannel? = null
     private var listeners: WebRtcListeners? = null
-    private val cameraRunning = AtomicBoolean(false)
+    private val mediaRunning = AtomicBoolean(false)
+    private var sharingScreen = false
 
     @Synchronized
     fun ensureInitialized() {
@@ -84,7 +87,7 @@ class PeerConnectionManager @Inject constructor(
     fun initLocalRenderer(renderer: SurfaceViewRenderer) {
         ensureInitialized()
         renderer.init(eglBase.eglBaseContext, null)
-        renderer.setMirror(true)
+        renderer.setMirror(!sharingScreen)
         renderer.setEnableHardwareScaler(true)
     }
 
@@ -160,16 +163,41 @@ class PeerConnectionManager @Inject constructor(
     @Synchronized
     fun startCamera(preferFront: Boolean = true) {
         ensureInitialized()
-        if (cameraRunning.get()) return
+        if (mediaRunning.get()) return
         val capturer = createFrontCapturer(preferFront) ?: run {
             Timber.e("No camera available")
             return
         }
+        sharingScreen = false
+        beginCapture(capturer, width = 1280, height = 720, fps = 30)
+        Timber.i("Local camera started")
+    }
+
+    @Synchronized
+    fun startScreenShare(permissionResultData: Intent) {
+        ensureInitialized()
+        if (mediaRunning.get()) return
+        val capturer = ScreenCapturerAndroid(
+            permissionResultData,
+            object : MediaProjection.Callback() {
+                override fun onStop() {
+                    Timber.w("MediaProjection stopped by system")
+                    mainHandler.post { stopCamera() }
+                }
+            }
+        )
+        sharingScreen = true
+        val dm = context.resources.displayMetrics
+        beginCapture(capturer, width = dm.widthPixels, height = dm.heightPixels, fps = 30)
+        Timber.i("Screen share started")
+    }
+
+    private fun beginCapture(capturer: VideoCapturer, width: Int, height: Int, fps: Int) {
         videoCapturer = capturer
         surfaceHelper = SurfaceTextureHelper.create("CaptureThread", eglBase.eglBaseContext)
         videoSource = factory!!.createVideoSource(capturer.isScreencast)
         capturer.initialize(surfaceHelper, context, videoSource!!.capturerObserver)
-        capturer.startCapture(1280, 720, 30)
+        capturer.startCapture(width, height, fps)
         localVideoTrack = factory!!.createVideoTrack("AH_VIDEO", videoSource).apply {
             setEnabled(true)
         }
@@ -179,13 +207,12 @@ class PeerConnectionManager @Inject constructor(
         }
         peerConnection?.addTrack(localVideoTrack, listOf("AH_STREAM"))
         peerConnection?.addTrack(localAudioTrack, listOf("AH_STREAM"))
-        cameraRunning.set(true)
-        Timber.i("Local camera started")
+        mediaRunning.set(true)
     }
 
     @Synchronized
     fun stopCamera() {
-        if (!cameraRunning.getAndSet(false)) return
+        if (!mediaRunning.getAndSet(false)) return
         runCatching { videoCapturer?.stopCapture() }
         runCatching { videoCapturer?.dispose() }
         videoCapturer = null
@@ -199,7 +226,8 @@ class PeerConnectionManager @Inject constructor(
         localAudioTrack = null
         audioSource?.dispose()
         audioSource = null
-        Timber.i("Local camera stopped")
+        sharingScreen = false
+        Timber.i("Local media stopped")
     }
 
     fun createOffer(onSuccess: (SessionDescription) -> Unit, onError: (String) -> Unit) {
@@ -245,7 +273,8 @@ class PeerConnectionManager @Inject constructor(
         channel.send(buffer)
     }
 
-    fun isCameraRunning(): Boolean = cameraRunning.get()
+    fun isCameraRunning(): Boolean = mediaRunning.get()
+    fun isScreenSharing(): Boolean = sharingScreen && mediaRunning.get()
 
     @Synchronized
     fun release() {
@@ -277,7 +306,7 @@ class PeerConnectionManager @Inject constructor(
         })
     }
 
-    private fun createFrontCapturer(preferFront: Boolean): CameraVideoCapturer? {
+    private fun createFrontCapturer(preferFront: Boolean): VideoCapturer? {
         val enumerator = Camera2Enumerator(context)
         val deviceNames = enumerator.deviceNames
         val preferred = deviceNames.firstOrNull {

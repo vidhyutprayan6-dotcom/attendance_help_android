@@ -15,6 +15,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
@@ -30,10 +31,21 @@ fun HomeScreen(
     onModeSettings: () -> Unit,
     onConnectSettings: () -> Unit,
     onRemoteList: () -> Unit,
-    onSession: () -> Unit,
+    onOpenControl: () -> Unit,
     onDisconnect: () -> Unit
 ) {
     val serverOk = state.serverLinkState == ServerLinkState.CONNECTED
+
+    // Remote: when a Control phone connects, open control view automatically (no Camera Session menu).
+    LaunchedEffect(state.mode, state.boundPeer, state.sessionLinkState) {
+        if (state.mode == DeviceMode.REMOTE &&
+            state.boundPeer != null &&
+            (state.sessionLinkState == SessionLinkState.BOUND ||
+                state.sessionLinkState == SessionLinkState.STREAMING)
+        ) {
+            onOpenControl()
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -69,7 +81,7 @@ fun HomeScreen(
             Text(stringResource(R.string.waiting_as_remote))
         }
         state.boundPeer?.let {
-            Text("Bound with: ${it.displayName}")
+            Text("${stringResource(R.string.bound_with)}: ${it.displayName}")
         }
         if (state.statusMessage.isNotBlank()) {
             Text(state.statusMessage, style = MaterialTheme.typography.bodyMedium)
@@ -94,17 +106,6 @@ fun HomeScreen(
             ) {
                 Text(stringResource(R.string.open_remote_list))
             }
-        }
-
-        val canOpenSession = state.sessionLinkState == SessionLinkState.BOUND ||
-            state.sessionLinkState == SessionLinkState.STREAMING ||
-            state.boundPeer != null
-        Button(
-            onClick = onSession,
-            modifier = Modifier.fillMaxWidth(),
-            enabled = canOpenSession
-        ) {
-            Text(stringResource(R.string.open_live_session))
         }
 
         if (serverOk) {

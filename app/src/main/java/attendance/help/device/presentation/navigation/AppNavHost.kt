@@ -79,7 +79,11 @@ fun AppNavHost(startDestination: String) {
                 onModeSettings = { navController.navigate(Routes.Mode) },
                 onConnectSettings = { navController.navigate(Routes.Connect) },
                 onRemoteList = { navController.navigate(Routes.RemoteList) },
-                onSession = { navController.navigate(Routes.Session) },
+                onOpenControl = {
+                    navController.navigate(Routes.Session) {
+                        launchSingleTop = true
+                    }
+                },
                 onDisconnect = {
                     vm.disconnect()
                     navController.navigate(Routes.Connect) {
@@ -110,9 +114,16 @@ fun AppNavHost(startDestination: String) {
                 mode = vm.mode,
                 onBindRenderers = vm::bindRenderers,
                 onUnbindRenderers = vm::unbindRenderers,
-                onOpenCamera = vm::openCameras,
-                onCloseCamera = vm::closeCameras,
-                onPing = vm::ping,
+                onReleaseRemote = {
+                    vm.releaseRemote()
+                    navController.popBackStack()
+                },
+                onRequestScreenShare = vm::requestScreenShare,
+                onRefreshAccessibility = vm::refreshAccessibility,
+                onTouch = vm::sendTouch,
+                onRemoteKey = vm::sendRemoteKey,
+                onStartRemotePhysicalCamera = vm::startRemotePhysicalCamera,
+                onStopRemotePhysicalCamera = vm::stopRemotePhysicalCamera,
                 onBack = { navController.popBackStack() }
             )
         }

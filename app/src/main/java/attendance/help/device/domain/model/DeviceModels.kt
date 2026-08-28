@@ -42,10 +42,11 @@ data class HubDevice(
 
 data class DualCameraSessionState(
     val isActive: Boolean = false,
+    /** Both phone cameras must be ON together when the camera session is active. */
     val bothCamerasOn: Boolean = false,
-    /** Control phone shows remote camera feed. */
+    /** Control UI also shows Remote screen for full control. */
     val controlShowsRemoteFeed: Boolean = true,
-    /** Remote phone shows control camera feed. */
+    /** Both phones' camera feeds show the Control phone video. */
     val remoteShowsControlFeed: Boolean = true
 )
 
@@ -62,5 +63,9 @@ data class AppLinkSnapshot(
     val statusMessage: String = "",
     val lastError: String? = null,
     val localDeviceId: String = "",
-    val webrtcState: String = "NEW"
+    val webrtcState: String = "NEW",
+    /** Remote must grant MediaProjection before Control can see/control its screen. */
+    val needsScreenSharePermission: Boolean = false,
+    val screenShareActive: Boolean = false,
+    val accessibilityEnabled: Boolean = false
 )

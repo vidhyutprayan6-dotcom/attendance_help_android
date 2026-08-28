@@ -7,11 +7,12 @@ import timber.log.Timber
 /**
  * Application entry point.
  *
- * Product rule (display — confirmed):
- * - Both phones start cameras together when the Controller opens the camera session.
- * - Controller screen shows the Controller's own live camera (local preview).
- * - Remote screen shows the Controller's live camera stream.
- * - Login / access restrictions are deferred; v1 focuses on unrestricted peer control.
+ * Product rules:
+ * 1. Connect / disconnect from the hub server.
+ * 2. Mode: Remote / Control / Nothing.
+ * 3. When bound: Control fully operates Remote (screen + input).
+ * 4. When cameras on: both cameras on; Control video shown on both phones' camera feeds.
+ * 5. Control can bind / unbind a Remote; busy Remote is exclusive to one Control.
  */
 @HiltAndroidApp
 class AttendanceHelpApp : Application() {

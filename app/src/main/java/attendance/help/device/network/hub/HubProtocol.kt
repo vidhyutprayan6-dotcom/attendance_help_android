@@ -49,6 +49,19 @@ sealed class HubMessage {
         override val type = TYPE_SESSION_BOUND
     }
 
+    data class SessionUnbind(
+        val fromId: String,
+        val peerId: String
+    ) : HubMessage() {
+        override val type = TYPE_SESSION_UNBIND
+    }
+
+    data class SessionUnbound(
+        val reason: String = "released"
+    ) : HubMessage() {
+        override val type = TYPE_SESSION_UNBOUNDED
+    }
+
     data class Unregister(val deviceId: String) : HubMessage() {
         override val type = TYPE_UNREGISTER
     }
@@ -90,6 +103,8 @@ sealed class HubMessage {
         const val TYPE_REQUEST_REMOTES = "request_remotes"
         const val TYPE_SELECT_REMOTE = "select_remote"
         const val TYPE_SESSION_BOUND = "session_bound"
+        const val TYPE_SESSION_UNBIND = "session_unbind"
+        const val TYPE_SESSION_UNBOUNDED = "session_unbound"
         const val TYPE_UNREGISTER = "unregister"
         const val TYPE_OFFER = "offer"
         const val TYPE_ANSWER = "answer"
@@ -138,6 +153,11 @@ class HubCodec(private val gson: Gson = Gson()) {
                 o.addProperty("controlName", message.controlName)
                 o.addProperty("remoteName", message.remoteName)
             }
+            is HubMessage.SessionUnbind -> {
+                o.addProperty("fromId", message.fromId)
+                o.addProperty("peerId", message.peerId)
+            }
+            is HubMessage.SessionUnbound -> o.addProperty("reason", message.reason)
             is HubMessage.Unregister -> o.addProperty("deviceId", message.deviceId)
             is HubMessage.RelayOffer -> {
                 o.addProperty("fromId", message.fromId)
@@ -207,6 +227,13 @@ class HubCodec(private val gson: Gson = Gson()) {
                 remoteDeviceId = o.get("remoteDeviceId").asString,
                 controlName = o.get("controlName")?.asString ?: "Control",
                 remoteName = o.get("remoteName")?.asString ?: "Remote"
+            )
+            HubMessage.TYPE_SESSION_UNBIND -> HubMessage.SessionUnbind(
+                fromId = o.get("fromId").asString,
+                peerId = o.get("peerId").asString
+            )
+            HubMessage.TYPE_SESSION_UNBOUNDED -> HubMessage.SessionUnbound(
+                reason = o.get("reason")?.asString ?: "released"
             )
             HubMessage.TYPE_UNREGISTER -> HubMessage.Unregister(o.get("deviceId").asString)
             HubMessage.TYPE_OFFER -> HubMessage.RelayOffer(

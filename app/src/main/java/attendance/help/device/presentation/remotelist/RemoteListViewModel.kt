@@ -22,8 +22,10 @@ class RemoteListViewModel @Inject constructor(
     )
 
     fun refresh() {
-        sessionController.announcePresence()
         sessionController.refreshRemoteList()
+        if (sessionController.uiState.value.boundPeer == null) {
+            sessionController.announcePresence()
+        }
     }
     fun select(remote: HubDevice) = sessionController.selectRemote(remote)
 }

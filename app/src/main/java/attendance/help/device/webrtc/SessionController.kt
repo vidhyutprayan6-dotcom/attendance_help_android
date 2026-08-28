@@ -27,6 +27,7 @@ import attendance.help.device.network.hub.HubClient
 import attendance.help.device.network.hub.HubMessage
 import attendance.help.device.service.LinkStatusService
 import attendance.help.device.service.ScreenShareService
+import attendance.help.device.utils.DeviceHints
 import attendance.help.device.utils.ServerAddressParser
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
@@ -64,6 +65,11 @@ class SessionController @Inject constructor(
     private val peerConnectionManager: PeerConnectionManager,
     private val screenShareCoordinator: ScreenShareCoordinator
 ) {
+    companion object {
+        /** Minimum bind duration before automatic server/client release is honored. */
+        const val MIN_SESSION_MS = 15_000L
+    }
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val sessionMutex = Mutex()
     private val gson = Gson()
@@ -81,6 +87,7 @@ class SessionController @Inject constructor(
     private var pendingOfferSdp: String? = null
     private var remoteScreenReady = false
     private var sessionEpoch = 0
+    private var sessionBoundAtMs: Long = 0L
     private val pendingIceCandidates = mutableListOf<IceCandidate>()
     private var touchDownX: Float? = null
     private var touchDownY: Float? = null
@@ -97,9 +104,10 @@ class SessionController @Inject constructor(
                     .onFailure { error ->
                         Timber.tag("REMOTE_SESSION").e(error, "Screen share setup failed")
                         ScreenShareService.stop(context)
+                        peerCreated = false
                         update {
                             copy(
-                                remoteSessionState = RemoteSessionState.ERROR,
+                                remoteSessionState = RemoteSessionState.WAITING,
                                 needsScreenSharePermission = true,
                                 screenShareActive = false,
                                 statusMessage = context.getString(
@@ -118,6 +126,13 @@ class SessionController @Inject constructor(
                         needsScreenSharePermission = true,
                         statusMessage = "Screen share denied — Control cannot see this phone"
                     )
+                }
+            }
+        }
+        if (DeviceHints.isProbablyEmulator()) {
+            scope.launch {
+                withContext(Dispatchers.Main) {
+                    peerConnectionManager.ensureInitialized()
                 }
             }
         }
@@ -142,6 +157,7 @@ class SessionController @Inject constructor(
             update { copy(statusMessage = "No Control connected yet") }
             return
         }
+        refreshAccessibilityState()
         if (!RemoteInputAccessibilityService.isEnabled()) {
             update {
                 copy(
@@ -151,7 +167,12 @@ class SessionController @Inject constructor(
             }
             return
         }
-        update { copy(remoteSessionState = RemoteSessionState.REQUESTING_SCREEN_PERMISSION) }
+        update {
+            copy(
+                remoteSessionState = RemoteSessionState.REQUESTING_SCREEN_PERMISSION,
+                statusMessage = "Allow screen capture when prompted…"
+            )
+        }
         val launched = screenShareCoordinator.requestScreenCapture()
         if (!launched) {
             update {
@@ -188,22 +209,33 @@ class SessionController @Inject constructor(
     fun announcePresence() {
         scope.launch {
             if (_ui.value.serverLinkState != ServerLinkState.CONNECTED) return@launch
+            if (hasActiveBind()) {
+                Timber.d("announcePresence skipped — active bind in progress")
+                return@launch
+            }
             val mode = _ui.value.mode
             if (mode == DeviceMode.NONE) return@launch
-            val name = sessionRepository.displayName.first()
-            hubClient?.send(
-                HubMessage.Register(
-                    deviceId = localDeviceId,
-                    displayName = name,
-                    mode = mode.name
-                )
-            )
-            if (mode == DeviceMode.CONTROL) {
-                hubClient?.send(HubMessage.RequestRemotes(localDeviceId))
-            }
-            Timber.i("announcePresence mode=%s", mode)
+            registerWithHub(mode)
         }
     }
+
+    private suspend fun registerWithHub(mode: DeviceMode) {
+        val name = sessionRepository.displayName.first()
+        hubClient?.send(
+            HubMessage.Register(
+                deviceId = localDeviceId,
+                displayName = name,
+                mode = mode.name
+            )
+        )
+        if (mode == DeviceMode.CONTROL && !hasActiveBind()) {
+            hubClient?.send(HubMessage.RequestRemotes(localDeviceId))
+        }
+        Timber.i("registerWithHub mode=%s bound=%s", mode, hasActiveBind())
+    }
+
+    private fun hasActiveBind(): Boolean =
+        boundPeerId != null || _ui.value.boundPeer != null
 
     fun startPresenceHeartbeat() {
         scope.launch {
@@ -396,41 +428,54 @@ class SessionController @Inject constructor(
 
     /** Control sends WebRTC offer after Remote screen is ready. */
     private suspend fun beginScreenControlSession() {
-        val peerId = boundPeerId ?: return
-        if (_ui.value.mode != DeviceMode.CONTROL) return
-        if (!remoteScreenReady) return
-        ensurePeer(isOfferer = true, force = false)
-        peerConnectionManager.createOffer(
-            onSuccess = { sdp ->
-                hubClient?.send(
-                    HubMessage.RelayOffer(
-                        fromId = localDeviceId,
-                        toId = peerId,
-                        sdp = sdp.description
+        sessionMutex.withLock {
+            val peerId = boundPeerId ?: return
+            if (_ui.value.mode != DeviceMode.CONTROL) return
+            if (!remoteScreenReady) return
+            if (!ensurePeer(isOfferer = true, force = false)) {
+                update { copy(statusMessage = "WebRTC setup failed — try disconnect and reconnect") }
+                return
+            }
+            peerConnectionManager.createOffer(
+                onSuccess = { sdp ->
+                    hubClient?.send(
+                        HubMessage.RelayOffer(
+                            fromId = localDeviceId,
+                            toId = peerId,
+                            sdp = sdp.description
+                        )
                     )
-                )
-            },
-            onError = { err -> scope.launch { sessionRepository.setLastError(err) } }
-        )
+                },
+                onError = { err -> scope.launch { sessionRepository.setLastError(err) } }
+            )
+        }
     }
 
     /** End control of the remote; remote becomes available again for other controls. */
     fun releaseRemoteControl() {
         scope.launch {
-            val peerId = boundPeerId
-            if (peerId != null) {
-                hubClient?.send(
-                    HubMessage.SessionUnbind(
-                        fromId = localDeviceId,
-                        peerId = peerId
+            sessionMutex.withLock {
+                val peerId = boundPeerId
+                if (peerId != null) {
+                    hubClient?.send(
+                        HubMessage.SessionUnbind(
+                            fromId = localDeviceId,
+                            peerId = peerId
+                        )
                     )
-                )
+                }
+                applySessionReleasedLocked("Disconnected from remote")
             }
-            applySessionReleased("Disconnected from remote")
         }
     }
 
     private suspend fun applySessionReleased(message: String) {
+        sessionMutex.withLock {
+            applySessionReleasedLocked(message)
+        }
+    }
+
+    private suspend fun applySessionReleasedLocked(message: String) {
         stopScreenLocally()
         peerConnectionManager.release()
         peerCreated = false
@@ -442,6 +487,7 @@ class SessionController @Inject constructor(
         clearPendingIce()
         sessionEpoch++
         activeSessionId = ""
+        sessionBoundAtMs = 0L
         sessionRepository.setSessionLinkState(
             if (_ui.value.mode == DeviceMode.REMOTE) {
                 SessionLinkState.WAITING_FOR_CONTROL
@@ -554,11 +600,14 @@ class SessionController @Inject constructor(
                     }
                     val mode = sessionRepository.deviceMode.first()
                     if (mode != DeviceMode.NONE) {
-                        setMode(mode)
+                        if (hasActiveBind()) {
+                            registerWithHub(mode)
+                        } else {
+                            setMode(mode)
+                        }
                     } else {
                         refreshStatusNotification(detail = "Choose Remote / Control / Nothing")
                     }
-                    announcePresence()
                 }
             },
             onClosed = {
@@ -622,19 +671,23 @@ class SessionController @Inject constructor(
                         clearPendingIce()
                         boundPeerId = null
 
-                        ensurePeer(isOfferer = iAmControl, force = true)
-                        if (!peerConnectionManager.hasPeerConnection()) {
-                            update {
-                                copy(
-                                    sessionLinkState = SessionLinkState.ERROR,
-                                    remoteSessionState = RemoteSessionState.ERROR,
-                                    statusMessage = "WebRTC setup failed — try disconnect and reconnect"
-                                )
+                        if (iAmControl) {
+                            if (!ensurePeer(isOfferer = true, force = true)) {
+                                update {
+                                    copy(
+                                        sessionLinkState = SessionLinkState.ERROR,
+                                        remoteSessionState = RemoteSessionState.ERROR,
+                                        statusMessage = "WebRTC setup failed — try disconnect and reconnect"
+                                    )
+                                }
+                                return@withLock
                             }
-                            return@withLock
+                        } else {
+                            peerCreated = false
                         }
 
                         boundPeerId = peer.deviceId
+                        sessionBoundAtMs = System.currentTimeMillis()
                         sessionRepository.setSessionLinkState(SessionLinkState.BOUND)
                         update {
                             copy(
@@ -668,10 +721,19 @@ class SessionController @Inject constructor(
                 }
                 is HubMessage.SessionUnbind -> Unit // client→server only
                 is HubMessage.SessionUnbound -> {
-                    if (boundPeerId != null || _ui.value.boundPeer != null) {
-                        applySessionReleased(
-                            message.reason.ifBlank { "Remote released" }
-                        )
+                    sessionMutex.withLock {
+                        val reason = message.reason.ifBlank { "Remote released" }
+                        if (shouldIgnoreAutoUnbound(reason)) {
+                            Timber.w(
+                                "Ignoring premature session_unbound reason=%s elapsed=%dms",
+                                reason,
+                                System.currentTimeMillis() - sessionBoundAtMs
+                            )
+                            return@withLock
+                        }
+                        if (boundPeerId != null || _ui.value.boundPeer != null) {
+                            applySessionReleasedLocked(reason)
+                        }
                     }
                 }
                 is HubMessage.ScreenReady -> {
@@ -687,26 +749,35 @@ class SessionController @Inject constructor(
                     beginScreenControlSession()
                 }
                 is HubMessage.RelayOffer -> {
-                    ensurePeer(isOfferer = false, force = false)
-                    pendingOfferFromId = message.fromId
-                    pendingOfferSdp = message.sdp
-                    tryAnswerPendingOffer()
+                    sessionMutex.withLock {
+                        if (!ensurePeer(isOfferer = false, force = false)) {
+                            Timber.e("RelayOffer ignored — peer not ready")
+                            return@withLock
+                        }
+                        pendingOfferFromId = message.fromId
+                        pendingOfferSdp = message.sdp
+                        tryAnswerPendingOffer()
+                    }
                 }
                 is HubMessage.RelayAnswer -> {
-                    peerConnectionManager.setRemoteDescription(
-                        SessionDescription(SessionDescription.Type.ANSWER, message.sdp)
-                    ) {
-                        flushPendingIceCandidates()
+                    sessionMutex.withLock {
+                        peerConnectionManager.setRemoteDescription(
+                            SessionDescription(SessionDescription.Type.ANSWER, message.sdp)
+                        ) {
+                            flushPendingIceCandidates()
+                        }
                     }
                 }
                 is HubMessage.RelayIce -> {
-                    val candidate = IceCandidate(
-                        message.sdpMid,
-                        message.sdpMLineIndex ?: 0,
-                        message.candidate
-                    )
-                    if (!peerConnectionManager.addIceCandidate(candidate)) {
-                        pendingIceCandidates.add(candidate)
+                    sessionMutex.withLock {
+                        val candidate = IceCandidate(
+                            message.sdpMid,
+                            message.sdpMLineIndex ?: 0,
+                            message.candidate
+                        )
+                        if (!peerConnectionManager.addIceCandidate(candidate)) {
+                            pendingIceCandidates.add(candidate)
+                        }
                     }
                 }
                 is HubMessage.CameraStart,
@@ -724,19 +795,6 @@ class SessionController @Inject constructor(
         sessionMutex.withLock {
             if (_ui.value.mode != DeviceMode.REMOTE) return
             val peerId = boundPeerId ?: return
-            if (!peerConnectionManager.hasPeerConnection()) {
-                ensurePeer(isOfferer = false, force = true)
-            }
-            if (!peerConnectionManager.hasPeerConnection()) {
-                update {
-                    copy(
-                        remoteSessionState = RemoteSessionState.ERROR,
-                        needsScreenSharePermission = true,
-                        statusMessage = "Peer connection not ready — wait a moment and tap Share screen again"
-                    )
-                }
-                return
-            }
 
             update {
                 copy(
@@ -751,15 +809,28 @@ class SessionController @Inject constructor(
             update { copy(remoteSessionState = RemoteSessionState.STARTING_STREAM) }
 
             val shareResult = withContext(Dispatchers.Main) {
-                peerConnectionManager.startScreenShareSafely(Intent(resultData))
+                var lastResult: Result<Unit> = Result.failure(
+                    IllegalStateException("WebRTC peer could not be created")
+                )
+                repeat(3) { attempt ->
+                    lastResult = peerConnectionManager.prepareRemoteScreenShare(
+                        listeners = webRtcListeners(),
+                        permissionResultData = Intent(resultData),
+                        forceRecreatePeer = attempt > 0
+                    )
+                    if (lastResult.isSuccess) return@withContext lastResult
+                    delay(150)
+                }
+                lastResult
             }
 
             if (shareResult.isFailure) {
+                peerCreated = false
                 ScreenShareService.stop(context)
                 val message = shareResult.exceptionOrNull()?.message ?: "Screen capture failed"
                 update {
                     copy(
-                        remoteSessionState = RemoteSessionState.ERROR,
+                        remoteSessionState = RemoteSessionState.WAITING,
                         needsScreenSharePermission = true,
                         screenShareActive = false,
                         statusMessage = context.getString(
@@ -770,6 +841,7 @@ class SessionController @Inject constructor(
                 }
                 return
             }
+            peerCreated = true
 
             val geom = CaptureGeometry(
                 sessionId = activeSessionId,
@@ -847,52 +919,58 @@ class SessionController @Inject constructor(
         pendingIceCandidates.clear()
     }
 
-    private fun ensurePeer(isOfferer: Boolean, force: Boolean = false) {
-        peerConnectionManager.createPeerConnection(
+    private fun ensurePeer(isOfferer: Boolean, force: Boolean = false): Boolean {
+        val effectiveForce = force || !peerCreated
+        val ok = peerConnectionManager.createPeerConnection(
             isController = isOfferer,
-            force = force || !peerCreated,
-            listeners = WebRtcListeners(
-                onIceCandidate = { c ->
-                    val peerId = boundPeerId ?: return@WebRtcListeners
-                    hubClient?.send(
-                        HubMessage.RelayIce(
-                            fromId = localDeviceId,
-                            toId = peerId,
-                            candidate = c.sdp,
-                            sdpMid = c.sdpMid,
-                            sdpMLineIndex = c.sdpMLineIndex
-                        )
-                    )
-                },
-                onConnectionChange = { state ->
-                    scope.launch {
-                        update { copy(webrtcState = state.name) }
-                        if (state == PeerConnection.PeerConnectionState.CONNECTED) {
-                            sessionRepository.setSessionLinkState(SessionLinkState.STREAMING)
-                            update { copy(sessionLinkState = SessionLinkState.STREAMING) }
-                        }
-                    }
-                },
-                onDataMessage = { handleData(it) },
-                onRemoteVideoTrack = { track ->
-                    scope.launch {
-                        if (_ui.value.mode != DeviceMode.CONTROL) return@launch
-                        remoteRenderer?.let { r -> inboundScreenTrack?.removeSink(r) }
-                        inboundScreenTrack = track
-                        remoteRenderer?.let { track.addSink(it) }
-                        update {
-                            copy(
-                                statusMessage = "Remote screen connected — touch to control",
-                                screenShareActive = true,
-                                sessionLinkState = SessionLinkState.STREAMING
-                            )
-                        }
-                    }
-                }
-            )
+            force = effectiveForce,
+            listeners = webRtcListeners()
         )
-        peerCreated = true
+        if (ok) {
+            peerCreated = true
+        }
+        return ok && peerConnectionManager.hasPeerConnection()
     }
+
+    private fun webRtcListeners(): WebRtcListeners = WebRtcListeners(
+        onIceCandidate = { c ->
+            val peerId = boundPeerId ?: return@WebRtcListeners
+            hubClient?.send(
+                HubMessage.RelayIce(
+                    fromId = localDeviceId,
+                    toId = peerId,
+                    candidate = c.sdp,
+                    sdpMid = c.sdpMid,
+                    sdpMLineIndex = c.sdpMLineIndex
+                )
+            )
+        },
+        onConnectionChange = { state ->
+            scope.launch {
+                update { copy(webrtcState = state.name) }
+                if (state == PeerConnection.PeerConnectionState.CONNECTED) {
+                    sessionRepository.setSessionLinkState(SessionLinkState.STREAMING)
+                    update { copy(sessionLinkState = SessionLinkState.STREAMING) }
+                }
+            }
+        },
+        onDataMessage = { handleData(it) },
+        onRemoteVideoTrack = { track ->
+            scope.launch {
+                if (_ui.value.mode != DeviceMode.CONTROL) return@launch
+                remoteRenderer?.let { r -> inboundScreenTrack?.removeSink(r) }
+                inboundScreenTrack = track
+                remoteRenderer?.let { track.addSink(it) }
+                update {
+                    copy(
+                        statusMessage = "Remote screen connected — touch to control",
+                        screenShareActive = true,
+                        sessionLinkState = SessionLinkState.STREAMING
+                    )
+                }
+            }
+        }
+    )
 
     private fun handleData(payload: String) {
         scope.launch {
@@ -1043,6 +1121,16 @@ class SessionController @Inject constructor(
             CommandTypes.KEY_BACK -> a11y.pressBack()
             CommandTypes.KEY_HOME -> a11y.pressHome()
             CommandTypes.KEY_RECENTS -> a11y.pressRecents()
+        }
+    }
+
+    private fun shouldIgnoreAutoUnbound(reason: String): Boolean {
+        if (sessionBoundAtMs <= 0L) return false
+        val elapsed = System.currentTimeMillis() - sessionBoundAtMs
+        if (elapsed >= MIN_SESSION_MS) return false
+        return when (reason) {
+            "re_registered", "peer_disconnected" -> true
+            else -> false
         }
     }
 

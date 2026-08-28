@@ -28,6 +28,8 @@ import attendance.help.device.domain.model.TurnServerConfig
 import attendance.help.device.utils.DeviceHints
 import timber.log.Timber
 import java.nio.ByteBuffer
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -49,9 +51,8 @@ data class WebRtcListeners(
 class PeerConnectionManager @Inject constructor(
     @ApplicationContext private val context: Context
 ) {
-    val eglBase: EglBase = EglBase.create()
-
     private val mainHandler = Handler(Looper.getMainLooper())
+    private var eglBase: EglBase? = null
     private var factory: PeerConnectionFactory? = null
     private var peerConnection: PeerConnection? = null
     private var videoCapturer: VideoCapturer? = null
@@ -69,6 +70,7 @@ class PeerConnectionManager @Inject constructor(
     var captureHeight: Int = 0
         private set
 
+    @Synchronized
     fun hasPeerConnection(): Boolean = peerConnection != null
 
     fun setTurnConfig(config: TurnServerConfig) {
@@ -76,36 +78,64 @@ class PeerConnectionManager @Inject constructor(
     }
 
     @Synchronized
+    private fun ensureEglBase(): EglBase {
+        eglBase?.let { return it }
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            val latch = CountDownLatch(1)
+            var initError: Throwable? = null
+            mainHandler.post {
+                try {
+                    eglBase = EglBase.create()
+                } catch (error: Throwable) {
+                    initError = error
+                } finally {
+                    latch.countDown()
+                }
+            }
+            latch.await(10, TimeUnit.SECONDS)
+            initError?.let { throw it }
+        } else {
+            eglBase = EglBase.create()
+        }
+        return eglBase ?: throw IllegalStateException("EGL context creation failed")
+    }
+
+    @Synchronized
     fun ensureInitialized() {
         if (factory != null) return
+        val egl = ensureEglBase()
         PeerConnectionFactory.initialize(
             PeerConnectionFactory.InitializationOptions.builder(context)
                 .setEnableInternalTracer(false)
                 .createInitializationOptions()
         )
-        val enableH264HighProfile = !DeviceHints.isProbablyEmulator()
-        val encoder = DefaultVideoEncoderFactory(eglBase.eglBaseContext, true, enableH264HighProfile)
-        val decoder = DefaultVideoDecoderFactory(eglBase.eglBaseContext)
+        val isEmulator = DeviceHints.isProbablyEmulator()
+        val encoder = DefaultVideoEncoderFactory(egl.eglBaseContext, !isEmulator, !isEmulator)
+        val decoder = DefaultVideoDecoderFactory(egl.eglBaseContext)
         factory = PeerConnectionFactory.builder()
             .setVideoEncoderFactory(encoder)
             .setVideoDecoderFactory(decoder)
             .createPeerConnectionFactory()
-        Timber.i("PeerConnectionFactory ready")
+        Timber.i("PeerConnectionFactory ready (emulator=%s)", isEmulator)
     }
 
     fun initRenderer(renderer: SurfaceViewRenderer) {
         ensureInitialized()
-        renderer.init(eglBase.eglBaseContext, null)
+        renderer.init(ensureEglBase().eglBaseContext, null)
         renderer.setMirror(false)
         renderer.setEnableHardwareScaler(true)
     }
 
     @Synchronized
-    fun createPeerConnection(isController: Boolean, listeners: WebRtcListeners, force: Boolean = false) {
+    fun createPeerConnection(
+        isController: Boolean,
+        listeners: WebRtcListeners,
+        force: Boolean = false
+    ): Boolean {
         ensureInitialized()
         if (peerConnection != null && !force) {
             this.listeners = listeners
-            return
+            return true
         }
         closePeerOnly()
         this.listeners = listeners
@@ -117,7 +147,7 @@ class PeerConnectionManager @Inject constructor(
             iceTransportsType = PeerConnection.IceTransportsType.ALL
         }
 
-        peerConnection = factory!!.createPeerConnection(rtcConfig, object : PeerConnection.Observer {
+        val pc = factory!!.createPeerConnection(rtcConfig, object : PeerConnection.Observer {
             override fun onSignalingChange(newState: PeerConnection.SignalingState) = Unit
             override fun onIceConnectionChange(newState: PeerConnection.IceConnectionState) = Unit
             override fun onIceConnectionReceivingChange(receiving: Boolean) = Unit
@@ -143,6 +173,16 @@ class PeerConnectionManager @Inject constructor(
                 listeners.onConnectionChange(newState)
             }
         })
+        if (pc == null) {
+            Timber.e(
+                "WEBRTC createPeerConnection returned null (controller=%s emulator=%s)",
+                isController,
+                DeviceHints.isProbablyEmulator()
+            )
+            peerConnection = null
+            return false
+        }
+        peerConnection = pc
 
         if (isController) {
             dataChannel = peerConnection?.createDataChannel(
@@ -151,6 +191,35 @@ class PeerConnectionManager @Inject constructor(
             )
             dataChannel?.let { attachDataChannel(it) }
         }
+        return true
+    }
+
+    /**
+     * Creates the peer (if needed) and starts screen capture in one synchronized step
+     * so another thread cannot clear the peer between the two operations.
+     */
+    @Synchronized
+    fun prepareRemoteScreenShare(
+        listeners: WebRtcListeners,
+        permissionResultData: Intent,
+        forceRecreatePeer: Boolean
+    ): Result<Unit> {
+        val peerReady = if (peerConnection == null || forceRecreatePeer) {
+            createPeerConnection(
+                isController = false,
+                listeners = listeners,
+                force = forceRecreatePeer || peerConnection != null
+            )
+        } else {
+            this.listeners = listeners
+            true
+        }
+        if (!peerReady || peerConnection == null) {
+            return Result.failure(
+                IllegalStateException("WebRTC peer could not be created on this device")
+            )
+        }
+        return startScreenShareSafely(permissionResultData)
     }
 
     private fun buildIceServers(): List<PeerConnection.IceServer> {
@@ -181,9 +250,7 @@ class PeerConnectionManager @Inject constructor(
                 Result.success(Unit)
             } else {
                 val pc = peerConnection
-                    ?: throw IllegalStateException(
-                        "Peer connection not ready — stay on session screen and try again"
-                    )
+                    ?: throw IllegalStateException("WebRTC peer connection is not ready")
                 val capturer = ScreenCapturerAndroid(
                     permissionResultData,
                     object : MediaProjection.Callback() {
@@ -237,7 +304,7 @@ class PeerConnectionManager @Inject constructor(
         pc: PeerConnection
     ) {
         videoCapturer = capturer
-        surfaceHelper = SurfaceTextureHelper.create("CaptureThread", eglBase.eglBaseContext)
+        surfaceHelper = SurfaceTextureHelper.create("CaptureThread", ensureEglBase().eglBaseContext)
         videoSource = factory!!.createVideoSource(capturer.isScreencast)
         capturer.initialize(surfaceHelper, context, videoSource!!.capturerObserver)
         capturer.startCapture(width, height, fps)

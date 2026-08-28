@@ -71,6 +71,11 @@ fun SessionScreen(
     }
 
     LaunchedEffect(Unit) { onRefreshAccessibility() }
+    LaunchedEffect(state.boundPeer, state.remoteSessionState) {
+        if (mode == DeviceMode.REMOTE && state.boundPeer != null) {
+            onRefreshAccessibility()
+        }
+    }
 
     var wasBound by remember { mutableStateOf(false) }
     LaunchedEffect(state.boundPeer) {
@@ -144,7 +149,10 @@ fun SessionScreen(
                 Button(
                     onClick = onRequestScreenShare,
                     modifier = Modifier.fillMaxWidth(),
-                    enabled = state.accessibilityEnabled && state.boundPeer != null
+                    enabled = state.accessibilityEnabled &&
+                        state.boundPeer != null &&
+                        state.remoteSessionState != RemoteSessionState.REQUESTING_SCREEN_PERMISSION &&
+                        state.remoteSessionState != RemoteSessionState.STARTING_STREAM
                 ) { Text(stringResource(R.string.start_screen_share)) }
                 Spacer(modifier = Modifier.height(8.dp))
             } else {

@@ -12,8 +12,10 @@ import org.webrtc.DefaultVideoEncoderFactory
 import org.webrtc.EglBase
 import org.webrtc.IceCandidate
 import org.webrtc.MediaConstraints
-import org.webrtc.MediaStream
-import org.webrtc.PeerConnection
+import org.webrtc.MediaStreamTrack
+import org.webrtc.RtpTransceiver
+import org.webrtc.RtpTransceiver.RtpTransceiverDirection
+import org.webrtc.RtpTransceiver.RtpTransceiverInit
 import org.webrtc.PeerConnectionFactory
 import org.webrtc.RtpReceiver
 import org.webrtc.ScreenCapturerAndroid
@@ -38,6 +40,7 @@ import kotlin.math.min
 data class WebRtcListeners(
     val onIceCandidate: (IceCandidate) -> Unit,
     val onConnectionChange: (PeerConnection.PeerConnectionState) -> Unit,
+    val onIceConnectionChange: (PeerConnection.IceConnectionState) -> Unit = {},
     val onDataMessage: (String) -> Unit,
     val onRemoteVideoTrack: (VideoTrack) -> Unit = {}
 )
@@ -141,15 +144,25 @@ class PeerConnectionManager @Inject constructor(
         this.listeners = listeners
 
         val iceServers = buildIceServers()
+        val isEmulator = DeviceHints.isProbablyEmulator()
         val rtcConfig = PeerConnection.RTCConfiguration(iceServers).apply {
             sdpSemantics = PeerConnection.SdpSemantics.UNIFIED_PLAN
             continualGatheringPolicy = PeerConnection.ContinualGatheringPolicy.GATHER_CONTINUALLY
             iceTransportsType = PeerConnection.IceTransportsType.ALL
+            bundlePolicy = PeerConnection.BundlePolicy.MAXBUNDLE
+            rtcpMuxPolicy = PeerConnection.RtcpMuxPolicy.REQUIRE
+            tcpCandidatePolicy = PeerConnection.TcpCandidatePolicy.ENABLED
+            if (isEmulator) {
+                iceCandidatePoolSize = 4
+            }
         }
 
         val pc = factory!!.createPeerConnection(rtcConfig, object : PeerConnection.Observer {
             override fun onSignalingChange(newState: PeerConnection.SignalingState) = Unit
-            override fun onIceConnectionChange(newState: PeerConnection.IceConnectionState) = Unit
+            override fun onIceConnectionChange(newState: PeerConnection.IceConnectionState) {
+                Timber.i("ICE connection state -> %s (emulator=%s)", newState, isEmulator)
+                mainHandler.post { listeners.onIceConnectionChange(newState) }
+            }
             override fun onIceConnectionReceivingChange(receiving: Boolean) = Unit
             override fun onIceGatheringChange(newState: PeerConnection.IceGatheringState) = Unit
             override fun onIceCandidate(candidate: IceCandidate) {
@@ -185,11 +198,31 @@ class PeerConnectionManager @Inject constructor(
         peerConnection = pc
 
         if (isController) {
-            dataChannel = peerConnection?.createDataChannel(
+            pc.addTransceiver(
+                MediaStreamTrack.MediaType.MEDIA_TYPE_VIDEO,
+                RtpTransceiverInit(RtpTransceiverDirection.RECV_ONLY)
+            )
+            dataChannel = pc.createDataChannel(
                 "control",
                 DataChannel.Init().apply { ordered = true }
             )
             dataChannel?.let { attachDataChannel(it) }
+        }
+        return true
+    }
+
+    /** Recreates the peer while keeping an active screen-share track attached (renegotiation). */
+    @Synchronized
+    fun recreatePeerForRenegotiation(
+        isController: Boolean,
+        listeners: WebRtcListeners
+    ): Boolean {
+        val hadMedia = mediaRunning.get()
+        val track = localVideoTrack
+        if (!createPeerConnection(isController, listeners, force = true)) return false
+        if (hadMedia && track != null) {
+            val pc = peerConnection ?: return false
+            pc.addTrack(track, listOf("AH_STREAM"))
         }
         return true
     }
@@ -234,6 +267,20 @@ class PeerConnectionManager @Inject constructor(
                 builder.setPassword(turnConfig.credential)
             }
             servers.add(builder.createIceServer())
+        }
+        if (DeviceHints.isProbablyEmulator() && turnConfig.urls.none { it.isNotBlank() }) {
+            Timber.i("Using public TURN fallback for emulator/LDPlayer testing")
+            listOf(
+                "turn:openrelay.metered.ca:80?transport=tcp",
+                "turn:openrelay.metered.ca:443?transport=tcp"
+            ).forEach { url ->
+                servers.add(
+                    PeerConnection.IceServer.builder(url)
+                        .setUsername("openrelayproject")
+                        .setPassword("openrelayproject")
+                        .createIceServer()
+                )
+            }
         }
         return servers
     }
@@ -336,31 +383,61 @@ class PeerConnectionManager @Inject constructor(
     }
 
     fun createOffer(onSuccess: (SessionDescription) -> Unit, onError: (String) -> Unit) {
-        val constraints = MediaConstraints().apply {
-            mandatory.add(MediaConstraints.KeyValuePair("OfferToReceiveVideo", "true"))
-            mandatory.add(MediaConstraints.KeyValuePair("OfferToReceiveAudio", "false"))
-        }
-        peerConnection?.createOffer(sdpObserver("offer", onSuccess, onError) { sdp ->
-            peerConnection?.setLocalDescription(simpleSdpObserver(), sdp)
-        }, constraints) ?: onError("No peer connection")
+        val pc = peerConnection ?: return onError("No peer connection")
+        val constraints = MediaConstraints()
+        pc.createOffer(object : SdpObserver {
+            override fun onCreateSuccess(sdp: SessionDescription) {
+                pc.setLocalDescription(object : SdpObserver {
+                    override fun onCreateSuccess(p0: SessionDescription?) = Unit
+                    override fun onSetSuccess() = onSuccess(sdp)
+                    override fun onCreateFailure(error: String?) =
+                        onError(error ?: "setLocalDescription failed for offer")
+                    override fun onSetFailure(error: String?) =
+                        onError(error ?: "setLocalDescription failed for offer")
+                }, sdp)
+            }
+            override fun onSetSuccess() = Unit
+            override fun onCreateFailure(error: String?) = onError(error ?: "create offer failed")
+            override fun onSetFailure(error: String?) = Unit
+        }, constraints)
     }
 
     fun createAnswer(onSuccess: (SessionDescription) -> Unit, onError: (String) -> Unit) {
-        val constraints = MediaConstraints().apply {
-            mandatory.add(MediaConstraints.KeyValuePair("OfferToReceiveVideo", "false"))
-            mandatory.add(MediaConstraints.KeyValuePair("OfferToReceiveAudio", "false"))
-        }
-        peerConnection?.createAnswer(sdpObserver("answer", onSuccess, onError) { sdp ->
-            peerConnection?.setLocalDescription(simpleSdpObserver(), sdp)
-        }, constraints) ?: onError("No peer connection")
+        val pc = peerConnection ?: return onError("No peer connection")
+        val constraints = MediaConstraints()
+        pc.createAnswer(object : SdpObserver {
+            override fun onCreateSuccess(sdp: SessionDescription) {
+                pc.setLocalDescription(object : SdpObserver {
+                    override fun onCreateSuccess(p0: SessionDescription?) = Unit
+                    override fun onSetSuccess() = onSuccess(sdp)
+                    override fun onCreateFailure(error: String?) =
+                        onError(error ?: "setLocalDescription failed for answer")
+                    override fun onSetFailure(error: String?) =
+                        onError(error ?: "setLocalDescription failed for answer")
+                }, sdp)
+            }
+            override fun onSetSuccess() = Unit
+            override fun onCreateFailure(error: String?) = onError(error ?: "create answer failed")
+            override fun onSetFailure(error: String?) = Unit
+        }, constraints)
     }
 
-    fun setRemoteDescription(sdp: SessionDescription, onDone: () -> Unit = {}) {
-        peerConnection?.setRemoteDescription(object : SdpObserver {
+    fun setRemoteDescription(
+        sdp: SessionDescription,
+        onDone: () -> Unit = {},
+        onError: (String) -> Unit = {}
+    ) {
+        val pc = peerConnection ?: run {
+            onError("No peer connection")
+            return
+        }
+        pc.setRemoteDescription(object : SdpObserver {
             override fun onCreateSuccess(p0: SessionDescription?) = Unit
             override fun onSetSuccess() = onDone()
-            override fun onCreateFailure(p0: String?) = Timber.e("setRemote create fail %s", p0)
-            override fun onSetFailure(p0: String?) = Timber.e("setRemote set fail %s", p0)
+            override fun onCreateFailure(error: String?) =
+                onError(error ?: "setRemoteDescription create failed")
+            override fun onSetFailure(error: String?) =
+                onError(error ?: "setRemoteDescription set failed")
         }, sdp)
     }
 
@@ -384,6 +461,12 @@ class PeerConnectionManager @Inject constructor(
 
     fun isScreenSharing(): Boolean = sharingScreen && mediaRunning.get()
     fun isLocalMediaPublishing(): Boolean = mediaRunning.get()
+
+    fun restartIce(onComplete: () -> Unit = {}) {
+        val pc = peerConnection ?: return
+        runCatching { pc.restartIce() }
+        onComplete()
+    }
 
     @Synchronized
     fun release() {
@@ -411,27 +494,5 @@ class PeerConnectionManager @Inject constructor(
                 mainHandler.post { listeners?.onDataMessage(text) }
             }
         })
-    }
-
-    private fun sdpObserver(
-        label: String,
-        onSuccess: (SessionDescription) -> Unit,
-        onError: (String) -> Unit,
-        afterCreate: (SessionDescription) -> Unit
-    ) = object : SdpObserver {
-        override fun onCreateSuccess(sdp: SessionDescription) {
-            afterCreate(sdp)
-            onSuccess(sdp)
-        }
-        override fun onSetSuccess() = Unit
-        override fun onCreateFailure(error: String?) = onError(error ?: "create $label failed")
-        override fun onSetFailure(error: String?) = onError(error ?: "set $label failed")
-    }
-
-    private fun simpleSdpObserver() = object : SdpObserver {
-        override fun onCreateSuccess(p0: SessionDescription?) = Unit
-        override fun onSetSuccess() = Unit
-        override fun onCreateFailure(p0: String?) = Timber.e(p0)
-        override fun onSetFailure(p0: String?) = Timber.e(p0)
     }
 }

@@ -88,6 +88,8 @@ class SessionController @Inject constructor(
     private var remoteScreenReady = false
     private var sessionEpoch = 0
     private var sessionBoundAtMs: Long = 0L
+    private var webrtcRetryCount = 0
+    private var handlingWebRtcFailure = false
     private val pendingIceCandidates = mutableListOf<IceCandidate>()
     private var touchDownX: Float? = null
     private var touchDownY: Float? = null
@@ -427,14 +429,22 @@ class SessionController @Inject constructor(
     }
 
     /** Control sends WebRTC offer after Remote screen is ready. */
-    private suspend fun beginScreenControlSession() {
+    private suspend fun beginScreenControlSession(forceNewPeer: Boolean = true) {
         sessionMutex.withLock {
             val peerId = boundPeerId ?: return
             if (_ui.value.mode != DeviceMode.CONTROL) return
             if (!remoteScreenReady) return
-            if (!ensurePeer(isOfferer = true, force = false)) {
+            clearPendingIce()
+            webrtcRetryCount = 0
+            if (!ensurePeer(isOfferer = true, force = forceNewPeer)) {
                 update { copy(statusMessage = "WebRTC setup failed — try disconnect and reconnect") }
                 return
+            }
+            update {
+                copy(
+                    statusMessage = "Starting video connection…",
+                    remoteSessionState = RemoteSessionState.STARTING_STREAM
+                )
             }
             peerConnectionManager.createOffer(
                 onSuccess = { sdp ->
@@ -446,7 +456,11 @@ class SessionController @Inject constructor(
                         )
                     )
                 },
-                onError = { err -> scope.launch { sessionRepository.setLastError(err) } }
+                onError = { err ->
+                    scope.launch {
+                        update { copy(statusMessage = "Video offer failed: $err") }
+                    }
+                }
             )
         }
     }
@@ -670,21 +684,9 @@ class SessionController @Inject constructor(
                         remoteScreenReady = false
                         clearPendingIce()
                         boundPeerId = null
+                        webrtcRetryCount = 0
 
-                        if (iAmControl) {
-                            if (!ensurePeer(isOfferer = true, force = true)) {
-                                update {
-                                    copy(
-                                        sessionLinkState = SessionLinkState.ERROR,
-                                        remoteSessionState = RemoteSessionState.ERROR,
-                                        statusMessage = "WebRTC setup failed — try disconnect and reconnect"
-                                    )
-                                }
-                                return@withLock
-                            }
-                        } else {
-                            peerCreated = false
-                        }
+                        peerCreated = false
 
                         boundPeerId = peer.deviceId
                         sessionBoundAtMs = System.currentTimeMillis()
@@ -707,7 +709,8 @@ class SessionController @Inject constructor(
                                 needsScreenSharePermission = !iAmControl,
                                 screenShareActive = false,
                                 captureGeometry = CaptureGeometry(sessionId = activeSessionId),
-                                accessibilityEnabled = RemoteInputAccessibilityService.isEnabled()
+                                accessibilityEnabled = RemoteInputAccessibilityService.isEnabled(),
+                                webrtcState = "NEW"
                             )
                         }
                         refreshStatusNotification(
@@ -746,11 +749,22 @@ class SessionController @Inject constructor(
                             screenShareActive = true
                         )
                     }
-                    beginScreenControlSession()
+                    beginScreenControlSession(forceNewPeer = true)
                 }
                 is HubMessage.RelayOffer -> {
                     sessionMutex.withLock {
-                        if (!ensurePeer(isOfferer = false, force = false)) {
+                        val needsRenegotiation = peerConnectionManager.isLocalMediaPublishing() &&
+                            (_ui.value.webrtcState == PeerConnection.PeerConnectionState.FAILED.name ||
+                                _ui.value.webrtcState == PeerConnection.PeerConnectionState.DISCONNECTED.name)
+                        val ok = if (needsRenegotiation) {
+                            peerConnectionManager.recreatePeerForRenegotiation(
+                                isController = false,
+                                listeners = webRtcListeners()
+                            ).also { if (it) peerCreated = true }
+                        } else {
+                            ensurePeer(isOfferer = false, force = false)
+                        }
+                        if (!ok) {
                             Timber.e("RelayOffer ignored — peer not ready")
                             return@withLock
                         }
@@ -762,10 +776,15 @@ class SessionController @Inject constructor(
                 is HubMessage.RelayAnswer -> {
                     sessionMutex.withLock {
                         peerConnectionManager.setRemoteDescription(
-                            SessionDescription(SessionDescription.Type.ANSWER, message.sdp)
-                        ) {
-                            flushPendingIceCandidates()
-                        }
+                            SessionDescription(SessionDescription.Type.ANSWER, message.sdp),
+                            onDone = { flushPendingIceCandidates() },
+                            onError = { err ->
+                                Timber.e("RelayAnswer setRemote failed: %s", err)
+                                scope.launch {
+                                    update { copy(statusMessage = "Video answer failed: $err") }
+                                }
+                            }
+                        )
                     }
                 }
                 is HubMessage.RelayIce -> {
@@ -807,6 +826,9 @@ class SessionController @Inject constructor(
             delay(300)
 
             update { copy(remoteSessionState = RemoteSessionState.STARTING_STREAM) }
+
+            clearPendingIce()
+            webrtcRetryCount = 0
 
             val shareResult = withContext(Dispatchers.Main) {
                 var lastResult: Result<Unit> = Result.failure(
@@ -885,27 +907,36 @@ class SessionController @Inject constructor(
         pendingOfferSdp = null
         pendingOfferFromId = null
         peerConnectionManager.setRemoteDescription(
-            SessionDescription(SessionDescription.Type.OFFER, sdp)
-        ) {
-            peerConnectionManager.createAnswer(
-                onSuccess = { answer ->
-                    hubClient?.send(
-                        HubMessage.RelayAnswer(
-                            fromId = localDeviceId,
-                            toId = fromId,
-                            sdp = answer.description
+            SessionDescription(SessionDescription.Type.OFFER, sdp),
+            onDone = {
+                peerConnectionManager.createAnswer(
+                    onSuccess = { answer ->
+                        hubClient?.send(
+                            HubMessage.RelayAnswer(
+                                fromId = localDeviceId,
+                                toId = fromId,
+                                sdp = answer.description
+                            )
                         )
-                    )
-                    flushPendingIceCandidates()
-                },
-                onError = { err ->
-                    Timber.e("createAnswer failed: %s", err)
-                    scope.launch {
-                        update { copy(statusMessage = "Video answer failed: $err") }
+                        flushPendingIceCandidates()
+                    },
+                    onError = { err ->
+                        Timber.e("createAnswer failed: %s", err)
+                        scope.launch {
+                            update { copy(statusMessage = "Video answer failed: $err") }
+                        }
                     }
+                )
+            },
+            onError = { err ->
+                Timber.e("setRemote offer failed: %s", err)
+                pendingOfferSdp = sdp
+                pendingOfferFromId = fromId
+                scope.launch {
+                    update { copy(statusMessage = "Video negotiation failed: $err") }
                 }
-            )
-        }
+            }
+        )
     }
 
     private fun flushPendingIceCandidates() {
@@ -947,12 +978,40 @@ class SessionController @Inject constructor(
         },
         onConnectionChange = { state ->
             scope.launch {
+                Timber.i("WebRTC peer state -> %s", state)
                 update { copy(webrtcState = state.name) }
-                if (state == PeerConnection.PeerConnectionState.CONNECTED) {
-                    sessionRepository.setSessionLinkState(SessionLinkState.STREAMING)
-                    update { copy(sessionLinkState = SessionLinkState.STREAMING) }
+                when (state) {
+                    PeerConnection.PeerConnectionState.CONNECTED -> {
+                        webrtcRetryCount = 0
+                        sessionRepository.setSessionLinkState(SessionLinkState.STREAMING)
+                        update {
+                            copy(
+                                sessionLinkState = SessionLinkState.STREAMING,
+                                remoteSessionState = RemoteSessionState.STREAMING,
+                                statusMessage = if (mode == DeviceMode.CONTROL) {
+                                    "Remote screen connected — touch to control"
+                                } else {
+                                    "Screen sharing — Control can see and operate this phone"
+                                }
+                            )
+                        }
+                    }
+                    PeerConnection.PeerConnectionState.FAILED -> {
+                        handleWebRtcFailure("WebRTC connection failed")
+                    }
+                    PeerConnection.PeerConnectionState.DISCONNECTED -> {
+                        if (_ui.value.sessionLinkState == SessionLinkState.STREAMING) {
+                            update {
+                                copy(statusMessage = "Video connection lost — retrying…")
+                            }
+                        }
+                    }
+                    else -> Unit
                 }
             }
+        },
+        onIceConnectionChange = { iceState ->
+            Timber.i("WebRTC ICE state -> %s", iceState)
         },
         onDataMessage = { handleData(it) },
         onRemoteVideoTrack = { track ->
@@ -961,16 +1020,55 @@ class SessionController @Inject constructor(
                 remoteRenderer?.let { r -> inboundScreenTrack?.removeSink(r) }
                 inboundScreenTrack = track
                 remoteRenderer?.let { track.addSink(it) }
-                update {
-                    copy(
-                        statusMessage = "Remote screen connected — touch to control",
-                        screenShareActive = true,
-                        sessionLinkState = SessionLinkState.STREAMING
-                    )
+                if (_ui.value.webrtcState != PeerConnection.PeerConnectionState.CONNECTED.name) {
+                    update {
+                        copy(
+                            statusMessage = "Video track received — establishing connection…",
+                            screenShareActive = true
+                        )
+                    }
                 }
             }
         }
     )
+
+    private suspend fun handleWebRtcFailure(reason: String) {
+        if (handlingWebRtcFailure) return
+        handlingWebRtcFailure = true
+        try {
+            if (webrtcRetryCount >= 2) {
+                update {
+                    copy(
+                        statusMessage = "$reason — tap Disconnect and try again",
+                        remoteSessionState = RemoteSessionState.WAITING
+                    )
+                }
+                return
+            }
+            webrtcRetryCount++
+            update { copy(statusMessage = "$reason — retrying ($webrtcRetryCount/2)…") }
+            when (_ui.value.mode) {
+                DeviceMode.CONTROL -> {
+                    sessionMutex.withLock {
+                        clearPendingIce()
+                        peerConnectionManager.release()
+                        peerCreated = false
+                        inboundScreenTrack = null
+                    }
+                    if (remoteScreenReady) {
+                        beginScreenControlSession(forceNewPeer = true)
+                    }
+                }
+                DeviceMode.REMOTE -> {
+                    val peerId = boundPeerId ?: return
+                    hubClient?.send(HubMessage.ScreenReady(fromId = localDeviceId, toId = peerId))
+                }
+                else -> Unit
+            }
+        } finally {
+            handlingWebRtcFailure = false
+        }
+    }
 
     private fun handleData(payload: String) {
         scope.launch {

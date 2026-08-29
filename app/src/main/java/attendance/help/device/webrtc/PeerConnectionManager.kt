@@ -24,6 +24,7 @@ import org.webrtc.MediaConstraints
 import org.webrtc.MediaStream
 import org.webrtc.MediaStreamTrack
 import org.webrtc.PeerConnection
+import org.webrtc.RtpTransceiver
 import org.webrtc.RtpTransceiver.RtpTransceiverDirection
 import org.webrtc.RtpTransceiver.RtpTransceiverInit
 import org.webrtc.PeerConnectionFactory
@@ -91,6 +92,7 @@ class PeerConnectionManager @Inject constructor(
     private var remoteLocalCameraSource: VideoSource? = null
     private val remoteLocalCameraRunning = AtomicBoolean(false)
     private var controlFirstFrameSink: VideoSink? = null
+    private val routedInboundTrackIds = mutableSetOf<String>()
     private var dataChannel: DataChannel? = null
     private var listeners: WebRtcListeners? = null
     private val mediaRunning = AtomicBoolean(false)
@@ -242,6 +244,7 @@ class PeerConnectionManager @Inject constructor(
         this.isControlRole = isControlDevice
         remoteDescriptionSet = false
         pendingRemoteIceCandidates.clear()
+        routedInboundTrackIds.clear()
         diagnostics.log("WEBRTC createPeerConnection generation=$peerGeneration control=$isControlDevice relayOnly=$forceRelayOnly", pc)
 
         if (isControlDevice) {
@@ -343,26 +346,31 @@ class PeerConnectionManager @Inject constructor(
                 notifyDiagnostics()
             }
 
-            override fun onRenegotiationNeeded() = Unit
+            override fun onRenegotiationNeeded() {
+                if (!alive()) return
+                diagnostics.log("RENEGOTIATION_NEEDED", pc())
+                Timber.tag("CAMERA_WEBRTC").i("onRenegotiationNeeded role=control=%s", isControlRole)
+            }
 
             override fun onAddTrack(receiver: RtpReceiver, mediaStreams: Array<out MediaStream>) {
                 if (!alive()) return
                 val track = receiver.track()
                 if (track is VideoTrack) {
-                    track.setEnabled(true)
-                    val id = track.id().orEmpty()
-                    val streamIds = mediaStreams.mapNotNull { it.id }.joinToString(",")
-                    // Role-based routing (stable): Control only receives screen; Remote only receives camera.
-                    if (isControlRole) {
-                        diagnostics.remoteVideoReceived = true
-                        diagnostics.log("REMOTE_SCREEN_TRACK_RECEIVED id=$id streams=$streamIds", pc())
-                        mainHandler.post { listeners?.onRemoteVideoTrack(track) }
-                    } else {
-                        diagnostics.log("CONTROL_CAMERA_TRACK_RECEIVED id=$id streams=$streamIds", pc())
-                        Timber.tag("CAMERA_WEBRTC").i("REMOTE_CONTROL_CAMERA_TRACK_RECEIVED id=%s", id)
-                        mainHandler.post { listeners?.onRemoteCameraTrack(track) }
-                    }
-                    notifyDiagnostics()
+                    routeInboundVideoTrack(track, mediaStreams.mapNotNull { it.id }, pc())
+                }
+            }
+
+            override fun onTrack(transceiver: RtpTransceiver) {
+                if (!alive()) return
+                val track = transceiver.receiver.track()
+                if (track is VideoTrack) {
+                    Timber.tag("CAMERA_WEBRTC").i(
+                        "onTrack mid=%s dir=%s track=%s",
+                        transceiver.mid,
+                        transceiver.direction,
+                        track.id()
+                    )
+                    routeInboundVideoTrack(track, emptyList(), pc())
                 }
             }
 
@@ -401,6 +409,30 @@ class PeerConnectionManager @Inject constructor(
             )
         }
         return startScreenShareSafely(permissionResultData)
+    }
+
+    private fun routeInboundVideoTrack(
+        track: VideoTrack,
+        streamIds: List<String>,
+        pc: PeerConnection?
+    ) {
+        track.setEnabled(true)
+        val id = track.id().orEmpty()
+        if (id.isNotEmpty() && !routedInboundTrackIds.add(id)) {
+            return
+        }
+        val streams = streamIds.joinToString(",")
+        // Role-based routing: Control only receives screen; Remote only receives camera.
+        if (isControlRole) {
+            diagnostics.remoteVideoReceived = true
+            diagnostics.log("REMOTE_SCREEN_TRACK_RECEIVED id=$id streams=$streams", pc)
+            mainHandler.post { listeners?.onRemoteVideoTrack(track) }
+        } else {
+            diagnostics.log("CONTROL_CAMERA_TRACK_RECEIVED id=$id streams=$streams", pc)
+            Timber.tag("CAMERA_WEBRTC").i("REMOTE_CONTROL_CAMERA_TRACK_RECEIVED id=%s streams=%s", id, streams)
+            mainHandler.post { listeners?.onRemoteCameraTrack(track) }
+        }
+        notifyDiagnostics()
     }
 
     /**
@@ -576,6 +608,8 @@ class PeerConnectionManager @Inject constructor(
                     override fun onSetSuccess() {
                         diagnostics.localDescriptionSet = true
                         diagnostics.log("WEBRTC setLocalOffer success", pc)
+                        logSdpVideoMLines("LOCAL_OFFER", sdp.description)
+                        logTransceiverState("AFTER_LOCAL_OFFER")
                         onSuccess(sdp)
                     }
                     override fun onCreateFailure(error: String?) =
@@ -600,6 +634,8 @@ class PeerConnectionManager @Inject constructor(
                     override fun onSetSuccess() {
                         diagnostics.localDescriptionSet = true
                         diagnostics.log("WEBRTC setLocalAnswer success", pc)
+                        logSdpVideoMLines("LOCAL_ANSWER", sdp.description)
+                        logTransceiverState("AFTER_LOCAL_ANSWER")
                         onSuccess(sdp)
                     }
                     override fun onCreateFailure(error: String?) =
@@ -744,6 +780,23 @@ class PeerConnectionManager @Inject constructor(
         channel.send(buffer)
     }
 
+    /** REMOTE: pick up camera VideoTrack from receivers if onAddTrack was missed. */
+    @Synchronized
+    fun pollInboundCameraTrack(): VideoTrack? {
+        if (isControlRole) return null
+        val pc = peerConnection ?: return null
+        return pc.transceivers
+            .asSequence()
+            .filter { it.mediaType == MediaStreamTrack.MediaType.MEDIA_TYPE_VIDEO }
+            .mapNotNull { it.receiver.track() as? VideoTrack }
+            .firstOrNull { track ->
+                val id = track.id().orEmpty()
+                id.isNotEmpty() &&
+                    id != localVideoTrack?.id() &&
+                    id != "AH_SCREEN"
+            }
+    }
+
     fun isScreenSharing(): Boolean = sharingScreen && mediaRunning.get()
     fun isLocalMediaPublishing(): Boolean = mediaRunning.get()
     fun isDataChannelOpen(): Boolean = dataChannel?.state() == DataChannel.State.OPEN
@@ -751,14 +804,69 @@ class PeerConnectionManager @Inject constructor(
     fun hasControlCameraSenderTrack(): Boolean = localCameraTrack != null
     fun isRemoteLocalCameraOpen(): Boolean = remoteLocalCameraRunning.get()
 
+    /** True when CONTROL camera sender is attached to a PeerConnection transceiver. */
+    fun isControlCameraSenderAttached(): Boolean {
+        val pc = peerConnection ?: return false
+        val trackId = localCameraTrack?.id() ?: return false
+        return pc.transceivers.any { it.sender.track()?.id() == trackId }
+    }
+
+    /** True when REMOTE already has a video RECV slot (or inbound camera receiver track). */
+    fun hasRemoteCameraReceiveSlot(): Boolean {
+        val pc = peerConnection ?: return false
+        if (isControlRole) return false
+        val video = pc.transceivers.filter {
+            it.mediaType == MediaStreamTrack.MediaType.MEDIA_TYPE_VIDEO
+        }
+        if (video.size >= 2) return true
+        return video.any {
+            it.direction == RtpTransceiverDirection.RECV_ONLY ||
+                it.direction == RtpTransceiverDirection.SEND_RECV
+        } && video.any {
+            it.sender.track()?.id() == localVideoTrack?.id() ||
+                it.sender.track()?.id() == "AH_SCREEN"
+        }
+    }
+
+    fun logTransceiverState(tag: String) {
+        val pc = peerConnection ?: return
+        val summary = pc.transceivers.mapIndexed { i, t ->
+            "[$i mid=${t.mid} dir=${t.direction} send=${t.sender.track()?.id()} recv=${t.receiver.track()?.id()}]"
+        }.joinToString(" ")
+        Timber.tag("CAMERA_WEBRTC").i("%s videoTx=%d %s", tag, pc.transceivers.size, summary)
+        diagnostics.log("$tag $summary", pc)
+    }
+
+    private fun logSdpVideoMLines(label: String, sdp: String) {
+        val mVideo = sdp.lineSequence().count { it.startsWith("m=video") }
+        val directions = sdp.lineSequence()
+            .filter {
+                it.startsWith("a=sendonly") || it.startsWith("a=recvonly") ||
+                    it.startsWith("a=sendrecv") || it.startsWith("a=inactive")
+            }
+            .take(8)
+            .joinToString(",")
+        Timber.tag("CAMERA_WEBRTC").i("%s m=video count=%d dirs=%s", label, mVideo, directions)
+    }
+
     /**
-     * REMOTE: add RECV_ONLY video transceiver for CONTROL camera before createOffer.
-     * Negotiates camera m-line in the initial SDP — no later renegotiation.
+     * REMOTE: ensure screen SEND_ONLY + camera RECV_ONLY before createOffer.
      */
     @Synchronized
     fun ensureRemoteCameraReceiverSlot() {
         val pc = peerConnection ?: return
         if (isControlRole) return
+
+        // Prefer explicit SEND_ONLY for screen so the second m-line is clearly camera recv.
+        pc.transceivers
+            .filter { it.mediaType == MediaStreamTrack.MediaType.MEDIA_TYPE_VIDEO }
+            .forEach { t ->
+                val sendId = t.sender.track()?.id()
+                if (sendId == localVideoTrack?.id() || sendId == "AH_SCREEN") {
+                    runCatching { t.direction = RtpTransceiverDirection.SEND_ONLY }
+                }
+            }
+
         val videoCount = pc.transceivers.count {
             it.mediaType == MediaStreamTrack.MediaType.MEDIA_TYPE_VIDEO
         }
@@ -768,40 +876,89 @@ class PeerConnectionManager @Inject constructor(
                 RtpTransceiverInit(RtpTransceiverDirection.RECV_ONLY)
             )
             diagnostics.log("REMOTE_CAMERA_RECV_TRANSCEIVER_ADDED count=${pc.transceivers.size}", pc)
-            Timber.tag("CAMERA_WEBRTC").i("REMOTE camera RECV transceiver prepared videoCount=%d", videoCount + 1)
+            Timber.tag("CAMERA_WEBRTC").i("REMOTE camera RECV transceiver prepared")
         }
+        logTransceiverState("REMOTE_PRE_OFFER")
     }
 
     /**
-     * CONTROL: create AH_CAMERA VideoTrack (no capture yet) and addTrack before createAnswer
-     * so the answer includes the camera send m-line.
+     * CONTROL: attach AH_CAMERA to the send transceiver created for Remote's camera recv m-line.
+     * Prefer setTrack on an empty video sender — do not create a third m-line via blind addTrack.
      */
     @Synchronized
     fun ensureControlCameraSenderReady(): Boolean {
         val pc = peerConnection ?: return false
         if (!isControlRole) return false
-        if (localCameraTrack != null) return true
         return try {
             ensureInitialized()
             if (cameraSource == null) {
                 cameraSource = factory!!.createVideoSource(false)
             }
-            localCameraTrack = factory!!.createVideoTrack("AH_CAMERA", cameraSource).apply {
-                setEnabled(true)
+            if (localCameraTrack == null) {
+                localCameraTrack = factory!!.createVideoTrack("AH_CAMERA", cameraSource).apply {
+                    setEnabled(true)
+                }
             }
-            pc.addTrack(localCameraTrack, listOf("AH_CAMERA_STREAM"))
-            diagnostics.log("CONTROL_CAMERA_SENDER_TRACK_READY", pc)
-            Timber.tag("CAMERA_WEBRTC").i("CONTROL_CAMERA_TRACK_SENT placeholder capturer=off")
-            true
+            val track = localCameraTrack!!
+            val attached = attachControlCameraTrackToPeerLocked(pc, track)
+            logTransceiverState("CONTROL_CAMERA_SENDER")
+            attached
         } catch (error: Throwable) {
             Timber.tag("CAMERA_CAPTURE").e(error, "ensureControlCameraSenderReady failed")
             false
         }
     }
 
+    private fun attachControlCameraTrackToPeerLocked(pc: PeerConnection, track: VideoTrack): Boolean {
+        // Already on a sender?
+        val already = pc.transceivers.firstOrNull { it.sender.track()?.id() == track.id() }
+        if (already != null) {
+            runCatching { already.direction = RtpTransceiverDirection.SEND_ONLY }
+            diagnostics.log("CONTROL_CAMERA_SENDER_ALREADY_ATTACHED mid=${already.mid}", pc)
+            return true
+        }
+
+        // Prefer empty video sender created for Remote's camera recvonly m-line.
+        val videoTx = pc.transceivers.filter {
+            it.mediaType == MediaStreamTrack.MediaType.MEDIA_TYPE_VIDEO
+        }
+        val emptySend = videoTx.firstOrNull { t ->
+            t.sender.track() == null &&
+                (
+                    t.direction == RtpTransceiverDirection.SEND_ONLY ||
+                        t.direction == RtpTransceiverDirection.INACTIVE ||
+                        t.direction == RtpTransceiverDirection.SEND_RECV
+                    )
+        } ?: videoTx.firstOrNull { t ->
+            // Second+ video transceiver with no local send track
+            videoTx.size >= 2 &&
+                t.sender.track() == null &&
+                t !== videoTx.first()
+        }
+
+        if (emptySend != null) {
+            emptySend.sender.setTrack(track, false)
+            runCatching { emptySend.direction = RtpTransceiverDirection.SEND_ONLY }
+            diagnostics.log("CONTROL_CAMERA_SET_TRACK mid=${emptySend.mid}", pc)
+            Timber.tag("CAMERA_WEBRTC").i(
+                "CONTROL_CAMERA_TRACK_SENT via setTrack mid=%s dir=%s",
+                emptySend.mid,
+                emptySend.direction
+            )
+            return true
+        }
+
+        // No camera send slot yet — addTrack (requires Remote offer with camera recv, or renegotiation).
+        pc.addTrack(track, listOf("AH_CAMERA_STREAM"))
+        diagnostics.log("CONTROL_CAMERA_ADD_TRACK", pc)
+        Timber.tag("CAMERA_WEBRTC").w("CONTROL_CAMERA_TRACK_SENT via addTrack (no empty send transceiver)")
+        logTransceiverState("CONTROL_AFTER_ADD_TRACK")
+        return true
+    }
+
     /**
      * Starts physical camera capture into the already-negotiated CONTROL camera track.
-     * Does NOT renegotiate SDP.
+     * Does NOT renegotiate SDP by itself.
      */
     @Synchronized
     fun startControlCameraCapture(localPreview: VideoSink? = null): Result<Unit> {

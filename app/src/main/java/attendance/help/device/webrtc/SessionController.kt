@@ -93,6 +93,7 @@ class SessionController @Inject constructor(
     private var localCameraPreview: SurfaceViewRenderer? = null
     private var inboundCameraTrack: VideoTrack? = null
     private var cameraSessionActive = false
+    private var cameraRenegotiateAttempts = 0
     private var remoteScreenReady = false
     private var sessionEpoch = 0
     private var sessionBoundAtMs: Long = 0L
@@ -237,7 +238,13 @@ class SessionController @Inject constructor(
                         hubClient?.send(
                             HubMessage.CameraStart(fromId = localDeviceId, toId = peerId)
                         )
-                        markCameraUiActiveLocked("Cameras active — Control camera streaming")
+                        markCameraUiActiveLocked(
+                            if (peerConnectionManager.isControlCameraSenderAttached()) {
+                                "Cameras active — Control camera streaming"
+                            } else {
+                                "Cameras on — negotiating video to Remote…"
+                            }
+                        )
                     }
                     DeviceMode.REMOTE -> {
                         // Ask Control to open published camera; open local sensor optionally.
@@ -255,6 +262,7 @@ class SessionController @Inject constructor(
                         }
                         cameraSessionActive = true
                         cameraSessionManager.markActive()
+                        ensureCameraReceivePathLocked()
                         update {
                             copy(
                                 dualCamera = DualCameraSessionState(
@@ -300,7 +308,7 @@ class SessionController @Inject constructor(
             PackageManager.PERMISSION_GRANTED
     }
 
-    /** CONTROL: FGS + start capture into pre-negotiated track. */
+    /** CONTROL: FGS + start capture into camera track (pre-negotiated or pending Remote re-offer). */
     private suspend fun activateControlCameraLocked(): Boolean {
         if (!hasCameraPermission()) {
             cameraSessionManager.markError("PERMISSION_REQUIRED")
@@ -310,18 +318,9 @@ class SessionController @Inject constructor(
             return false
         }
         Timber.tag("CAMERA_SYNC").i("CAMERA_PERMISSION_OK")
-        if (!peerConnectionManager.hasControlCameraSenderTrack()) {
-            // Slot must exist from initial answer; try once to attach (needs reconnect if fails).
-            val ready = withContext(Dispatchers.Main) {
-                peerConnectionManager.ensureControlCameraSenderReady()
-            }
-            if (!ready) {
-                cameraSessionManager.markError("CAMERA_SLOT_MISSING")
-                update {
-                    copy(statusMessage = context.getString(R.string.camera_reconnect_required))
-                }
-                return false
-            }
+        withContext(Dispatchers.Main) {
+            peerConnectionManager.ensureControlCameraSenderReady()
+            peerConnectionManager.logTransceiverState("CONTROL_PRE_CAPTURE")
         }
         runCatching { CameraCaptureService.start(context) }
         val result = withContext(Dispatchers.Main) {
@@ -334,9 +333,46 @@ class SessionController @Inject constructor(
             update { copy(statusMessage = "Camera failed: $reason") }
             return false
         }
+        if (!peerConnectionManager.isControlCameraSenderAttached()) {
+            Timber.tag("CAMERA_WEBRTC").w(
+                "Control camera capturer started but sender not on PeerConnection — waiting for Remote camera re-offer"
+            )
+        }
         cameraSessionActive = true
         cameraSessionManager.markActive()
         return true
+    }
+
+    /**
+     * REMOTE only: if Control camera track is not inbound yet, add RECV slot and re-offer.
+     * Keeps Remote as sole offerer (screen + camera m-lines). Safe while already CONNECTED.
+     */
+    private fun ensureCameraReceivePathLocked() {
+        if (_ui.value.mode != DeviceMode.REMOTE) return
+        if (inboundCameraTrack != null) {
+            Timber.tag("CAMERA_WEBRTC").i("camera receive path OK — inbound track present")
+            return
+        }
+        peerConnectionManager.ensureRemoteCameraReceiverSlot()
+        peerConnectionManager.logTransceiverState("REMOTE_CAMERA_ENSURE")
+        if (offerInFlight) {
+            Timber.tag("CAMERA_WEBRTC").i("camera renegotiate deferred — offer in flight")
+            return
+        }
+        if (cameraRenegotiateAttempts >= 2) {
+            Timber.tag("CAMERA_WEBRTC").w("camera renegotiate attempts exhausted")
+            update {
+                copy(statusMessage = "Control camera not received — stop/start cameras or reconnect")
+            }
+            return
+        }
+        cameraRenegotiateAttempts++
+        Timber.tag("CAMERA_WEBRTC").i(
+            "CAMERA_SLOT_RENEGOTIATE Remote createOffer attempt=%d",
+            cameraRenegotiateAttempts
+        )
+        update { copy(statusMessage = "Negotiating Control camera video…") }
+        beginRemoteOfferLocked()
     }
 
     private fun markCameraUiActiveLocked(message: String) {
@@ -356,6 +392,7 @@ class SessionController @Inject constructor(
     private fun stopCamerasLocallyLocked() {
         Timber.tag("CAMERA_SYNC").i("CAMERA_STOPPING")
         cameraSessionActive = false
+        cameraRenegotiateAttempts = 0
         peerConnectionManager.stopFrontCamera()
         runCatching { CameraCaptureService.stop(context) }
         cameraSessionManager.markStopped()
@@ -1210,6 +1247,23 @@ class SessionController @Inject constructor(
                                 webrtcLog("WEBRTC setRemoteAnswer success")
                                 offerInFlight = false
                                 flushPendingIceCandidates()
+                                peerConnectionManager.logTransceiverState("REMOTE_AFTER_ANSWER")
+                                scope.launch {
+                                    sessionMutex.withLock {
+                                        if (cameraSessionActive && inboundCameraTrack == null) {
+                                            peerConnectionManager.pollInboundCameraTrack()?.let { track ->
+                                                Timber.tag("CAMERA_WEBRTC").i(
+                                                    "REMOTE pollInboundCameraTrack id=%s",
+                                                    track.id()
+                                                )
+                                                attachInboundCameraTrackLocked(track)
+                                            }
+                                            if (inboundCameraTrack == null) {
+                                                ensureCameraReceivePathLocked()
+                                            }
+                                        }
+                                    }
+                                }
                             },
                             onError = { err ->
                                 Timber.e("RelayAnswer failed: %s", err)
@@ -1293,7 +1347,10 @@ class SessionController @Inject constructor(
                             }
                             DeviceMode.REMOTE -> {
                                 if (!cameraSessionManager.beginStart(cmd)) {
-                                    if (cameraSessionActive) return@withLock
+                                    if (cameraSessionActive) {
+                                        ensureCameraReceivePathLocked()
+                                        return@withLock
+                                    }
                                 } else {
                                     cameraSessionManager.markPreparing()
                                 }
@@ -1302,6 +1359,7 @@ class SessionController @Inject constructor(
                                 }
                                 cameraSessionActive = true
                                 cameraSessionManager.markActive()
+                                ensureCameraReceivePathLocked()
                                 update {
                                     copy(
                                         dualCamera = DualCameraSessionState(
@@ -1314,7 +1372,7 @@ class SessionController @Inject constructor(
                                             inboundCameraTrack != null ->
                                                 "Cameras active — Control camera received"
                                             localOnly.isFailure ->
-                                                "Cameras on — waiting for Control camera (local cam: ${localOnly.exceptionOrNull()?.message})"
+                                                "Cameras on — negotiating Control camera…"
                                             else ->
                                                 "Cameras on — waiting for Control camera video…"
                                         }
@@ -1520,40 +1578,57 @@ class SessionController @Inject constructor(
         onRemoteCameraTrack = { track ->
             scope.launch {
                 if (_ui.value.mode != DeviceMode.REMOTE) return@launch
-                Timber.tag("CAMERA_WEBRTC").i(
-                    "REMOTE_CONTROL_CAMERA_TRACK_RECEIVED id=%s",
-                    track.id()
-                )
-                cameraRenderer?.let { r -> inboundCameraTrack?.removeSink(r) }
-                inboundCameraTrack = track
-                val firstFrame = object : org.webrtc.VideoSink {
-                    private val seen = java.util.concurrent.atomic.AtomicBoolean(false)
-                    override fun onFrame(frame: org.webrtc.VideoFrame) {
-                        if (seen.compareAndSet(false, true)) {
-                            Timber.tag("CAMERA_WEBRTC").i("REMOTE_CONTROL_CAMERA_FIRST_FRAME")
-                        }
-                    }
-                }
-                track.addSink(firstFrame)
-                cameraRenderer?.let { track.addSink(it) }
-                if (cameraSessionActive) {
-                    update {
-                        copy(
-                            dualCamera = dualCamera.copy(
-                                isActive = true,
-                                bothCamerasOn = true,
-                                remoteShowsControlFeed = true
-                            ),
-                            statusMessage = "Control camera received"
-                        )
-                    }
-                }
+                attachInboundCameraTrackLocked(track)
             }
         },
         onDiagnosticsChanged = { diag ->
             scope.launch { evaluateTransportState(diag) }
         }
     )
+
+    private fun attachInboundCameraTrackLocked(track: VideoTrack) {
+        if (inboundCameraTrack?.id() == track.id()) {
+            cameraRenderer?.let { r ->
+                runCatching { track.addSink(r) }
+            }
+            return
+        }
+        Timber.tag("CAMERA_WEBRTC").i(
+            "REMOTE_CONTROL_CAMERA_TRACK_RECEIVED id=%s",
+            track.id()
+        )
+        cameraRenderer?.let { r -> inboundCameraTrack?.removeSink(r) }
+        inboundCameraTrack = track
+        track.setEnabled(true)
+        val firstFrame = object : org.webrtc.VideoSink {
+            private val seen = java.util.concurrent.atomic.AtomicBoolean(false)
+            override fun onFrame(frame: org.webrtc.VideoFrame) {
+                if (seen.compareAndSet(false, true)) {
+                    Timber.tag("CAMERA_WEBRTC").i("REMOTE_CONTROL_CAMERA_FIRST_FRAME")
+                    scope.launch {
+                        update {
+                            copy(statusMessage = "Control camera video playing")
+                        }
+                    }
+                }
+            }
+        }
+        track.addSink(firstFrame)
+        cameraRenderer?.let { track.addSink(it) }
+        if (cameraSessionActive) {
+            cameraRenegotiateAttempts = 0
+            update {
+                copy(
+                    dualCamera = dualCamera.copy(
+                        isActive = true,
+                        bothCamerasOn = true,
+                        remoteShowsControlFeed = true
+                    ),
+                    statusMessage = "Control camera received"
+                )
+            }
+        }
+    }
 
     private suspend fun handleWebRtcFailure(reason: String) {
         if (handlingWebRtcFailure) return

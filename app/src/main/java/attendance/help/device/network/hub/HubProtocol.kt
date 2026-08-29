@@ -72,11 +72,23 @@ sealed class HubMessage {
         override val type = TYPE_UNREGISTER
     }
 
-    data class RelayOffer(val fromId: String, val toId: String, val sdp: String) : HubMessage() {
+    data class RelayOffer(
+        val fromId: String,
+        val toId: String,
+        val sdp: String,
+        val negotiationGen: Int = 0,
+        val sessionId: String = ""
+    ) : HubMessage() {
         override val type = TYPE_OFFER
     }
 
-    data class RelayAnswer(val fromId: String, val toId: String, val sdp: String) : HubMessage() {
+    data class RelayAnswer(
+        val fromId: String,
+        val toId: String,
+        val sdp: String,
+        val negotiationGen: Int = 0,
+        val sessionId: String = ""
+    ) : HubMessage() {
         override val type = TYPE_ANSWER
     }
 
@@ -85,7 +97,9 @@ sealed class HubMessage {
         val toId: String,
         val candidate: String,
         val sdpMid: String?,
-        val sdpMLineIndex: Int?
+        val sdpMLineIndex: Int?,
+        val negotiationGen: Int = 0,
+        val sessionId: String = ""
     ) : HubMessage() {
         override val type = TYPE_ICE
     }
@@ -185,11 +199,23 @@ class HubCodec(private val gson: Gson = Gson()) {
                 o.addProperty("fromId", message.fromId)
                 o.addProperty("toId", message.toId)
                 o.addProperty("sdp", message.sdp)
+                if (message.negotiationGen > 0) {
+                    o.addProperty("negotiationGen", message.negotiationGen)
+                }
+                if (message.sessionId.isNotBlank()) {
+                    o.addProperty("sessionId", message.sessionId)
+                }
             }
             is HubMessage.RelayAnswer -> {
                 o.addProperty("fromId", message.fromId)
                 o.addProperty("toId", message.toId)
                 o.addProperty("sdp", message.sdp)
+                if (message.negotiationGen > 0) {
+                    o.addProperty("negotiationGen", message.negotiationGen)
+                }
+                if (message.sessionId.isNotBlank()) {
+                    o.addProperty("sessionId", message.sessionId)
+                }
             }
             is HubMessage.RelayIce -> {
                 o.addProperty("fromId", message.fromId)
@@ -197,6 +223,12 @@ class HubCodec(private val gson: Gson = Gson()) {
                 o.addProperty("candidate", message.candidate)
                 message.sdpMid?.let { o.addProperty("sdpMid", it) }
                 message.sdpMLineIndex?.let { o.addProperty("sdpMLineIndex", it) }
+                if (message.negotiationGen > 0) {
+                    o.addProperty("negotiationGen", message.negotiationGen)
+                }
+                if (message.sessionId.isNotBlank()) {
+                    o.addProperty("sessionId", message.sessionId)
+                }
             }
             is HubMessage.CameraStart -> {
                 o.addProperty("fromId", message.fromId)
@@ -278,19 +310,25 @@ class HubCodec(private val gson: Gson = Gson()) {
             HubMessage.TYPE_OFFER -> HubMessage.RelayOffer(
                 fromId = o.get("fromId").asString,
                 toId = o.get("toId").asString,
-                sdp = o.get("sdp").asString
+                sdp = o.get("sdp").asString,
+                negotiationGen = o.get("negotiationGen")?.asInt ?: 0,
+                sessionId = o.get("sessionId")?.asString.orEmpty()
             )
             HubMessage.TYPE_ANSWER -> HubMessage.RelayAnswer(
                 fromId = o.get("fromId").asString,
                 toId = o.get("toId").asString,
-                sdp = o.get("sdp").asString
+                sdp = o.get("sdp").asString,
+                negotiationGen = o.get("negotiationGen")?.asInt ?: 0,
+                sessionId = o.get("sessionId")?.asString.orEmpty()
             )
             HubMessage.TYPE_ICE -> HubMessage.RelayIce(
                 fromId = o.get("fromId").asString,
                 toId = o.get("toId").asString,
                 candidate = o.get("candidate").asString,
                 sdpMid = o.get("sdpMid")?.asString,
-                sdpMLineIndex = o.get("sdpMLineIndex")?.asInt
+                sdpMLineIndex = o.get("sdpMLineIndex")?.asInt,
+                negotiationGen = o.get("negotiationGen")?.asInt ?: 0,
+                sessionId = o.get("sessionId")?.asString.orEmpty()
             )
             HubMessage.TYPE_CAMERA_START -> HubMessage.CameraStart(
                 fromId = o.get("fromId").asString,

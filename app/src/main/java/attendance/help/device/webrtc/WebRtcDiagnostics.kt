@@ -68,20 +68,19 @@ class WebRtcDiagnostics {
     }
 
     fun logIceCandidateError(event: IceCandidateErrorEvent, pc: PeerConnection?) {
-        val safeUrl = event.url?.substringBefore("@").orEmpty()
+        val safeUrl = event.url.substringBefore("@")
         lastIceError = "code=${event.errorCode} text=${event.errorText} url=$safeUrl"
-        log("ICE_CANDIDATE_ERROR code=${event.errorCode} text=${event.errorText} address=${event.address} port=${event.port} url=$safeUrl", pc)
+        log(
+            "ICE_CANDIDATE_ERROR code=${event.errorCode} text=${event.errorText} " +
+                "address=${event.address} port=${event.port} url=$safeUrl",
+            pc
+        )
     }
 
     fun recordLocalCandidate(candidate: IceCandidate, pc: PeerConnection?) {
-        when (parseCandidateType(candidate.sdp)) {
-            CandidateType.HOST -> localHostCandidates++
-            CandidateType.SRFLX -> localSrflxCandidates++
-            CandidateType.RELAY -> localRelayCandidates++
-            CandidateType.UNKNOWN -> Unit
-        }
-        val type = parseCandidateType(candidate.sdp)
-        val protocol = parseCandidateProtocol(candidate.sdp)
+        incrementLocalCounter(candidate.sdp)
+        val type = candidateTypeLabel(candidate.sdp)
+        val protocol = candidateProtocolLabel(candidate.sdp)
         log(
             "LOCAL_ICE_CANDIDATE type=$type protocol=$protocol sdpMid=${candidate.sdpMid} mLine=${candidate.sdpMLineIndex}",
             pc
@@ -92,14 +91,9 @@ class WebRtcDiagnostics {
     }
 
     fun recordRemoteCandidate(candidate: IceCandidate, pc: PeerConnection?) {
-        when (parseCandidateType(candidate.sdp)) {
-            CandidateType.HOST -> remoteHostCandidates++
-            CandidateType.SRFLX -> remoteSrflxCandidates++
-            CandidateType.RELAY -> remoteRelayCandidates++
-            CandidateType.UNKNOWN -> Unit
-        }
-        val type = parseCandidateType(candidate.sdp)
-        val protocol = parseCandidateProtocol(candidate.sdp)
+        incrementRemoteCounter(candidate.sdp)
+        val type = candidateTypeLabel(candidate.sdp)
+        val protocol = candidateProtocolLabel(candidate.sdp)
         log(
             "REMOTE_ICE_CANDIDATE type=$type protocol=$protocol sdpMid=${candidate.sdpMid} mLine=${candidate.sdpMLineIndex}",
             pc
@@ -188,6 +182,30 @@ class WebRtcDiagnostics {
         )
     }
 
+    private fun incrementLocalCounter(sdp: String) {
+        when (candidateTypeLabel(sdp)) {
+            "host" -> localHostCandidates++
+            "srflx" -> localSrflxCandidates++
+            "relay" -> localRelayCandidates++
+        }
+    }
+
+    private fun incrementRemoteCounter(sdp: String) {
+        when (candidateTypeLabel(sdp)) {
+            "host" -> remoteHostCandidates++
+            "srflx" -> remoteSrflxCandidates++
+            "relay" -> remoteRelayCandidates++
+        }
+    }
+
+    private fun candidateTypeLabel(sdp: String): String {
+        return Regex("""typ\s+(\w+)""").find(sdp)?.groupValues?.getOrNull(1)?.lowercase() ?: "unknown"
+    }
+
+    private fun candidateProtocolLabel(sdp: String): String {
+        return Regex("""\s(\d+)\s+(udp|tcp)\s""").find(sdp)?.groupValues?.getOrNull(2) ?: "unknown"
+    }
+
     private fun syncFromPeer(pc: PeerConnection?) {
         if (pc == null) return
         signalingState = pc.signalingState()
@@ -212,23 +230,7 @@ class WebRtcDiagnostics {
         }
     }
 
-    private enum class CandidateType { HOST, SRFLX, RELAY, UNKNOWN }
-
-    companion object {
-        private const val TAG = "WEBRTC_DIAG"
-
-        fun parseCandidateType(sdp: String): CandidateType {
-            val typ = Regex("""typ\s+(\w+)""").find(sdp)?.groupValues?.getOrNull(1)?.lowercase()
-            return when (typ) {
-                "host" -> CandidateType.HOST
-                "srflx" -> CandidateType.SRFLX
-                "relay" -> CandidateType.RELAY
-                else -> CandidateType.UNKNOWN
-            }
-        }
-
-        fun parseCandidateProtocol(sdp: String): String {
-            return Regex("""\s(\d+)\s+(udp|tcp)\s""").find(sdp)?.groupValues?.getOrNull(2) ?: "unknown"
-        }
+    private companion object {
+        const val TAG = "WEBRTC_DIAG"
     }
 }

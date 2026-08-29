@@ -777,7 +777,13 @@ class SessionController @Inject constructor(
             when (message) {
                 is HubMessage.RegisterAck -> {
                     update { copy(statusMessage = message.message.ifBlank { "Registered" }) }
-                    message.turnConfig?.let { peerConnectionManager.setTurnConfig(it) }
+                    val turn = message.turnConfig ?: TurnServerConfig()
+                    peerConnectionManager.setTurnConfig(turn)
+                    Timber.i(
+                        "RegisterAck turnUrls=%d turnUserBlank=%s",
+                        turn.urls.size,
+                        turn.username.isBlank()
+                    )
                 }
                 is HubMessage.RemotesList -> {
                     update {

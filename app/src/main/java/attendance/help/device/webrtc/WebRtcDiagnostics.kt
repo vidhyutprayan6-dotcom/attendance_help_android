@@ -68,11 +68,13 @@ class WebRtcDiagnostics {
     }
 
     fun logIceCandidateError(event: IceCandidateErrorEvent, pc: PeerConnection?) {
-        val safeUrl = event.url.substringBefore("@")
-        lastIceError = "code=${event.errorCode} text=${event.errorText} url=$safeUrl"
+        val safeUrl = event.url?.substringBefore("@").orEmpty()
+        val address = event.address.orEmpty()
+        val errorText = event.errorText.orEmpty()
+        lastIceError = "code=${event.errorCode} text=$errorText url=$safeUrl"
         log(
-            "ICE_CANDIDATE_ERROR code=${event.errorCode} text=${event.errorText} " +
-                "address=${event.address} port=${event.port} url=$safeUrl",
+            "ICE_CANDIDATE_ERROR code=${event.errorCode} text=$errorText " +
+                "address=$address port=${event.port} url=$safeUrl",
             pc
         )
     }

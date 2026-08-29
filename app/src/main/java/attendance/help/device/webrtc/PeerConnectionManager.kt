@@ -20,7 +20,6 @@ import org.webrtc.MediaConstraints
 import org.webrtc.MediaStream
 import org.webrtc.MediaStreamTrack
 import org.webrtc.PeerConnection
-import org.webrtc.RtpTransceiver
 import org.webrtc.RtpTransceiver.RtpTransceiverDirection
 import org.webrtc.RtpTransceiver.RtpTransceiverInit
 import org.webrtc.PeerConnectionFactory
@@ -97,7 +96,12 @@ class PeerConnectionManager @Inject constructor(
 
     fun setTurnConfig(config: TurnServerConfig) {
         turnConfig = config
-        diagnostics.turnConfigured = config.urls.any { it.isNotBlank() }
+        val hubHasTurn = config.urls.any { it.isNotBlank() }
+        diagnostics.turnConfigured = hubHasTurn || BuildConfig.DEBUG
+        diagnostics.log(
+            "TURN_CONFIG_FROM_HUB urls=${config.urls.size} userBlank=${config.username.isBlank()} " +
+                "willUseFallback=${!hubHasTurn}"
+        )
     }
 
     fun updateDiagnosticsContext(
@@ -393,8 +397,14 @@ class PeerConnectionManager @Inject constructor(
             servers.add(builder.createIceServer())
             turnFromHub = true
         }
-        if (DeviceHints.isProbablyEmulator() && !turnFromHub) {
-            diagnostics.log("Using public TURN fallback for emulator/LDPlayer testing")
+        // Always fall back to OpenRelay when hub did not provide TURN.
+        // LDPlayer often fails STUN (error 701) and needs relay candidates.
+        // Debug builds always ensure TURN; release builds also fall back if hub TURN is empty
+        // so two devices behind NAT/emulator can still connect during early testing.
+        if (!turnFromHub) {
+            diagnostics.log(
+                "Using public TURN fallback (hubTurnEmpty=true emulator=${DeviceHints.isProbablyEmulator()})"
+            )
             listOf(
                 "turn:openrelay.metered.ca:80",
                 "turn:openrelay.metered.ca:443",
@@ -414,6 +424,9 @@ class PeerConnectionManager @Inject constructor(
         diagnostics.turnConfigured = servers.any { s ->
             s.urls.any { it.startsWith("turn:", ignoreCase = true) || it.startsWith("turns:", ignoreCase = true) }
         }
+        diagnostics.log(
+            "ICE_SERVERS count=${servers.size} turnConfigured=${diagnostics.turnConfigured} turnFromHub=$turnFromHub"
+        )
         return servers
     }
 

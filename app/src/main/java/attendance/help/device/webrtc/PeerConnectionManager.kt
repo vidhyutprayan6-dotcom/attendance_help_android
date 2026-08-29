@@ -43,6 +43,8 @@ import org.webrtc.VideoSource
 import org.webrtc.VideoTrack
 import timber.log.Timber
 import java.nio.ByteBuffer
+import java.util.Collections
+import java.util.WeakHashMap
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -93,6 +95,8 @@ class PeerConnectionManager @Inject constructor(
     private val remoteLocalCameraRunning = AtomicBoolean(false)
     private var controlFirstFrameSink: VideoSink? = null
     private val routedInboundTrackIds = mutableSetOf<String>()
+    private val initializedRenderers =
+        Collections.newSetFromMap(WeakHashMap<SurfaceViewRenderer, Boolean>())
     private var dataChannel: DataChannel? = null
     private var listeners: WebRtcListeners? = null
     private val mediaRunning = AtomicBoolean(false)
@@ -184,9 +188,17 @@ class PeerConnectionManager @Inject constructor(
 
     fun initRenderer(renderer: SurfaceViewRenderer, mirror: Boolean = false) {
         ensureInitialized()
-        renderer.init(ensureEglBase().eglBaseContext, null)
+        if (!initializedRenderers.contains(renderer)) {
+            renderer.init(ensureEglBase().eglBaseContext, null)
+            initializedRenderers.add(renderer)
+        }
         renderer.setMirror(mirror)
         renderer.setEnableHardwareScaler(true)
+    }
+
+    fun releaseRenderer(renderer: SurfaceViewRenderer) {
+        initializedRenderers.remove(renderer)
+        runCatching { renderer.release() }
     }
 
     /**
@@ -780,21 +792,72 @@ class PeerConnectionManager @Inject constructor(
         channel.send(buffer)
     }
 
-    /** REMOTE: pick up camera VideoTrack from receivers if onAddTrack was missed. */
+    /** REMOTE: pick up inbound CONTROL camera VideoTrack from receivers. */
     @Synchronized
     fun pollInboundCameraTrack(): VideoTrack? {
         if (isControlRole) return null
         val pc = peerConnection ?: return null
-        return pc.transceivers
-            .asSequence()
-            .filter { it.mediaType == MediaStreamTrack.MediaType.MEDIA_TYPE_VIDEO }
-            .mapNotNull { it.receiver.track() as? VideoTrack }
+        val screenId = localVideoTrack?.id()
+        val videoTx = pc.transceivers.filter {
+            it.mediaType == MediaStreamTrack.MediaType.MEDIA_TYPE_VIDEO
+        }
+        // Prefer recv transceiver carrying AH_CAMERA (not our screen send).
+        val fromCameraRecv = videoTx.firstOrNull { t ->
+            val recv = t.receiver.track() as? VideoTrack ?: return@firstOrNull false
+            val id = recv.id().orEmpty()
+            id.isNotEmpty() &&
+                id != screenId &&
+                id != "AH_SCREEN" &&
+                (
+                    id.contains("CAMERA", ignoreCase = true) ||
+                        t.direction == RtpTransceiverDirection.RECV_ONLY ||
+                        t.direction == RtpTransceiverDirection.SEND_RECV
+                    )
+        }?.receiver?.track() as? VideoTrack
+        if (fromCameraRecv != null) return fromCameraRecv
+        return videoTx.mapNotNull { it.receiver.track() as? VideoTrack }
             .firstOrNull { track ->
                 val id = track.id().orEmpty()
-                id.isNotEmpty() &&
-                    id != localVideoTrack?.id() &&
-                    id != "AH_SCREEN"
+                id.isNotEmpty() && id != screenId && id != "AH_SCREEN"
             }
+    }
+
+    /**
+     * CONTROL: after SDP renegotiation, re-bind AH_CAMERA to the current send transceiver.
+     * Keeps capturer running — only fixes the sender attachment.
+     */
+    @Synchronized
+    fun reattachControlCameraSenderAfterNegotiation(): Boolean {
+        if (!isControlRole) return false
+        val pc = peerConnection ?: return false
+        val track = localCameraTrack ?: return false
+        val attached = attachControlCameraTrackToPeerLocked(pc, track)
+        logTransceiverState("CONTROL_CAMERA_REATTACH")
+        Timber.tag("CAMERA_WEBRTC").i(
+            "CONTROL_CAMERA_REATTACH attached=%s running=%s",
+            attached,
+            cameraRunning.get()
+        )
+        return attached
+    }
+
+    /** Short summary for on-screen camera debug (debug builds). */
+    fun cameraDebugSummary(): String {
+        val pc = peerConnection
+        if (pc == null) return "pc=null"
+        val tx = pc.transceivers.filter { it.mediaType == MediaStreamTrack.MediaType.MEDIA_TYPE_VIDEO }
+        val recvCamera = pollInboundCameraTrack()?.id() ?: "none"
+        return buildString {
+            append("role=${if (isControlRole) "CONTROL" else "REMOTE"} ")
+            append("camRun=${cameraRunning.get()} ")
+            append("camSender=${localCameraTrack?.id() ?: "none"} ")
+            append("camAttached=${isControlCameraSenderAttached()} ")
+            append("inbound=$recvCamera ")
+            append("videoTx=${tx.size} ")
+            tx.forEachIndexed { i, t ->
+                append("[$i:${t.direction}/s=${t.sender.track()?.id()}/r=${t.receiver.track()?.id()}] ")
+            }
+        }.trim()
     }
 
     fun isScreenSharing(): Boolean = sharingScreen && mediaRunning.get()

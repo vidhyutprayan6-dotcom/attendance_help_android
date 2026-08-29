@@ -1,7 +1,5 @@
 # Project-level ignore rules for Attendance Help
 *.iml
-/backend
-
 .gradle/
 /local.properties
 /.idea/

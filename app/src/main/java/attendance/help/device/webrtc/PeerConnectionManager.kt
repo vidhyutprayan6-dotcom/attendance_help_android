@@ -10,7 +10,9 @@ import attendance.help.device.domain.model.TurnServerConfig
 import attendance.help.device.domain.model.WebRtcTransportDiagnostics
 import attendance.help.device.utils.DeviceHints
 import dagger.hilt.android.qualifiers.ApplicationContext
+import org.webrtc.Camera1Enumerator
 import org.webrtc.Camera2Enumerator
+import org.webrtc.CameraEnumerator
 import org.webrtc.CameraVideoCapturer
 import org.webrtc.DataChannel
 import org.webrtc.DefaultVideoDecoderFactory
@@ -34,6 +36,7 @@ import org.webrtc.SessionDescription
 import org.webrtc.SurfaceTextureHelper
 import org.webrtc.SurfaceViewRenderer
 import org.webrtc.VideoCapturer
+import org.webrtc.VideoFrame
 import org.webrtc.VideoSink
 import org.webrtc.VideoSource
 import org.webrtc.VideoTrack
@@ -82,6 +85,12 @@ class PeerConnectionManager @Inject constructor(
     private var cameraSource: VideoSource? = null
     private var localCameraTrack: VideoTrack? = null
     private val cameraRunning = AtomicBoolean(false)
+    /** REMOTE local physical camera — never published to PeerConnection. */
+    private var remoteLocalCameraCapturer: VideoCapturer? = null
+    private var remoteLocalCameraHelper: SurfaceTextureHelper? = null
+    private var remoteLocalCameraSource: VideoSource? = null
+    private val remoteLocalCameraRunning = AtomicBoolean(false)
+    private var controlFirstFrameSink: VideoSink? = null
     private var dataChannel: DataChannel? = null
     private var listeners: WebRtcListeners? = null
     private val mediaRunning = AtomicBoolean(false)
@@ -90,6 +99,8 @@ class PeerConnectionManager @Inject constructor(
     private var remoteDescriptionSet = false
     private val pendingRemoteIceCandidates = mutableListOf<IceCandidate>()
     private var statsPolling = false
+    /** True when this device is CONTROL (answerer). Used to route inbound tracks. */
+    private var isControlRole: Boolean = false
 
     val diagnostics = WebRtcDiagnostics()
 
@@ -169,10 +180,10 @@ class PeerConnectionManager @Inject constructor(
         diagnostics.log("PeerConnectionFactory ready emulator=$isEmulator")
     }
 
-    fun initRenderer(renderer: SurfaceViewRenderer) {
+    fun initRenderer(renderer: SurfaceViewRenderer, mirror: Boolean = false) {
         ensureInitialized()
         renderer.init(ensureEglBase().eglBaseContext, null)
-        renderer.setMirror(false)
+        renderer.setMirror(mirror)
         renderer.setEnableHardwareScaler(true)
     }
 
@@ -192,6 +203,8 @@ class PeerConnectionManager @Inject constructor(
             notifyDiagnostics()
             return true
         }
+        disposeControlCameraSenderFully()
+        stopRemoteLocalCameraOnly()
         closePeerOnly()
         peerGeneration++
         observerGeneration = peerGeneration
@@ -226,11 +239,13 @@ class PeerConnectionManager @Inject constructor(
             return false
         }
         peerConnection = pc
+        this.isControlRole = isControlDevice
         remoteDescriptionSet = false
         pendingRemoteIceCandidates.clear()
         diagnostics.log("WEBRTC createPeerConnection generation=$peerGeneration control=$isControlDevice relayOnly=$forceRelayOnly", pc)
 
         if (isControlDevice) {
+            // m-line #1 slot: receive REMOTE screen
             pc.addTransceiver(
                 MediaStreamTrack.MediaType.MEDIA_TYPE_VIDEO,
                 RtpTransceiverInit(RtpTransceiverDirection.RECV_ONLY)
@@ -245,6 +260,7 @@ class PeerConnectionManager @Inject constructor(
             )
             dataChannel?.let { attachDataChannel(it) }
             diagnostics.log("DATACHANNEL_CREATED label=control", pc)
+            // m-line #2 slot prepared later before offer: receive CONTROL camera
         }
         notifyDiagnostics()
         return true
@@ -335,13 +351,16 @@ class PeerConnectionManager @Inject constructor(
                 if (track is VideoTrack) {
                     track.setEnabled(true)
                     val id = track.id().orEmpty()
-                    val isCamera = id.contains("CAMERA", ignoreCase = true)
-                    diagnostics.log("REMOTE_VIDEO_TRACK_RECEIVED id=$id camera=$isCamera", pc())
-                    if (isCamera) {
-                        mainHandler.post { listeners?.onRemoteCameraTrack(track) }
-                    } else {
+                    val streamIds = mediaStreams.mapNotNull { it.id }.joinToString(",")
+                    // Role-based routing (stable): Control only receives screen; Remote only receives camera.
+                    if (isControlRole) {
                         diagnostics.remoteVideoReceived = true
+                        diagnostics.log("REMOTE_SCREEN_TRACK_RECEIVED id=$id streams=$streamIds", pc())
                         mainHandler.post { listeners?.onRemoteVideoTrack(track) }
+                    } else {
+                        diagnostics.log("CONTROL_CAMERA_TRACK_RECEIVED id=$id streams=$streamIds", pc())
+                        Timber.tag("CAMERA_WEBRTC").i("REMOTE_CONTROL_CAMERA_TRACK_RECEIVED id=%s", id)
+                        mainHandler.post { listeners?.onRemoteCameraTrack(track) }
                     }
                     notifyDiagnostics()
                 }
@@ -390,6 +409,8 @@ class PeerConnectionManager @Inject constructor(
      */
     @Synchronized
     fun teardownPeerForReconnect() {
+        disposeControlCameraSenderFully()
+        stopRemoteLocalCameraOnly()
         closePeerOnly()
         remoteDescriptionSet = false
         pendingRemoteIceCandidates.clear()
@@ -727,65 +748,243 @@ class PeerConnectionManager @Inject constructor(
     fun isLocalMediaPublishing(): Boolean = mediaRunning.get()
     fun isDataChannelOpen(): Boolean = dataChannel?.state() == DataChannel.State.OPEN
     fun isCameraRunning(): Boolean = cameraRunning.get()
+    fun hasControlCameraSenderTrack(): Boolean = localCameraTrack != null
+    fun isRemoteLocalCameraOpen(): Boolean = remoteLocalCameraRunning.get()
 
     /**
-     * Starts the front camera.
-     * @param publishToPeer if true, adds the track to PeerConnection (Control → Remote).
-     * @param localPreview optional sink for local preview (Control UI).
+     * REMOTE: add RECV_ONLY video transceiver for CONTROL camera before createOffer.
+     * Negotiates camera m-line in the initial SDP — no later renegotiation.
      */
     @Synchronized
-    fun startFrontCamera(
-        publishToPeer: Boolean,
-        localPreview: VideoSink? = null
-    ): Result<Unit> {
+    fun ensureRemoteCameraReceiverSlot() {
+        val pc = peerConnection ?: return
+        if (isControlRole) return
+        val videoCount = pc.transceivers.count {
+            it.mediaType == MediaStreamTrack.MediaType.MEDIA_TYPE_VIDEO
+        }
+        if (videoCount < 2) {
+            pc.addTransceiver(
+                MediaStreamTrack.MediaType.MEDIA_TYPE_VIDEO,
+                RtpTransceiverInit(RtpTransceiverDirection.RECV_ONLY)
+            )
+            diagnostics.log("REMOTE_CAMERA_RECV_TRANSCEIVER_ADDED count=${pc.transceivers.size}", pc)
+            Timber.tag("CAMERA_WEBRTC").i("REMOTE camera RECV transceiver prepared videoCount=%d", videoCount + 1)
+        }
+    }
+
+    /**
+     * CONTROL: create AH_CAMERA VideoTrack (no capture yet) and addTrack before createAnswer
+     * so the answer includes the camera send m-line.
+     */
+    @Synchronized
+    fun ensureControlCameraSenderReady(): Boolean {
+        val pc = peerConnection ?: return false
+        if (!isControlRole) return false
+        if (localCameraTrack != null) return true
         return try {
             ensureInitialized()
-            if (cameraRunning.get()) {
-                localPreview?.let { sink -> localCameraTrack?.addSink(sink) }
-                return Result.success(Unit)
+            if (cameraSource == null) {
+                cameraSource = factory!!.createVideoSource(false)
             }
-            val enumerator = Camera2Enumerator(context)
-            val front = enumerator.deviceNames.firstOrNull { enumerator.isFrontFacing(it) }
-                ?: enumerator.deviceNames.firstOrNull()
-                ?: return Result.failure(IllegalStateException("No camera available"))
-            val capturer = enumerator.createCapturer(front, null)
-                ?: return Result.failure(IllegalStateException("Could not open camera"))
-            cameraCapturer = capturer
-            cameraSurfaceHelper = SurfaceTextureHelper.create(
-                "CameraCaptureThread",
-                ensureEglBase().eglBaseContext
-            )
-            cameraSource = factory!!.createVideoSource(false)
-            capturer.initialize(cameraSurfaceHelper, context, cameraSource!!.capturerObserver)
-            val (w, h, fps) = if (DeviceHints.isProbablyEmulator()) {
-                Triple(640, 480, 15)
-            } else {
-                Triple(640, 480, 24)
-            }
-            capturer.startCapture(w, h, fps)
             localCameraTrack = factory!!.createVideoTrack("AH_CAMERA", cameraSource).apply {
                 setEnabled(true)
             }
-            localPreview?.let { localCameraTrack?.addSink(it) }
-            if (publishToPeer) {
-                val pc = peerConnection
-                    ?: return Result.failure(IllegalStateException("Peer connection not ready"))
-                pc.addTrack(localCameraTrack, listOf("AH_CAMERA_STREAM"))
-                diagnostics.log("CAMERA_TRACK_PUBLISHED", pc)
+            pc.addTrack(localCameraTrack, listOf("AH_CAMERA_STREAM"))
+            diagnostics.log("CONTROL_CAMERA_SENDER_TRACK_READY", pc)
+            Timber.tag("CAMERA_WEBRTC").i("CONTROL_CAMERA_TRACK_SENT placeholder capturer=off")
+            true
+        } catch (error: Throwable) {
+            Timber.tag("CAMERA_CAPTURE").e(error, "ensureControlCameraSenderReady failed")
+            false
+        }
+    }
+
+    /**
+     * Starts physical camera capture into the already-negotiated CONTROL camera track.
+     * Does NOT renegotiate SDP.
+     */
+    @Synchronized
+    fun startControlCameraCapture(localPreview: VideoSink? = null): Result<Unit> {
+        return try {
+            ensureInitialized()
+            if (!ensureControlCameraSenderReady()) {
+                return Result.failure(
+                    IllegalStateException(
+                        "Camera sender track missing — reconnect session so CONTROL camera m-line is negotiated"
+                    )
+                )
             }
+            if (cameraRunning.get()) {
+                localPreview?.let { localCameraTrack?.addSink(it) }
+                return Result.success(Unit)
+            }
+            val (enumerator, deviceName) = selectCameraDevice()
+                ?: return Result.failure(
+                    IllegalStateException(
+                        if (DeviceHints.isProbablyEmulator()) {
+                            "EMULATOR_CAMERA_NOT_AVAILABLE — enable webcam in LDPlayer settings"
+                        } else {
+                            "CAMERA_UNAVAILABLE"
+                        }
+                    )
+                )
+            Timber.tag("CAMERA_CAPTURE").i("Using camera device=%s", deviceName)
+            val capturer = enumerator.createCapturer(deviceName, null)
+                ?: return Result.failure(IllegalStateException("CAMERA_UNAVAILABLE"))
+            cameraCapturer = capturer
+            if (cameraSurfaceHelper == null) {
+                cameraSurfaceHelper = SurfaceTextureHelper.create(
+                    "CameraCaptureThread",
+                    ensureEglBase().eglBaseContext
+                )
+            }
+            val source = cameraSource
+                ?: return Result.failure(IllegalStateException("Camera VideoSource missing"))
+            capturer.initialize(cameraSurfaceHelper, context, source.capturerObserver)
+            val (w, h, fps) = if (DeviceHints.isProbablyEmulator()) {
+                Triple(640, 480, 15)
+            } else {
+                Triple(1280, 720, 24)
+            }
+            capturer.startCapture(w, h, fps)
+            localPreview?.let { sink -> localCameraTrack?.addSink(sink) }
+            attachControlFirstFrameProbe()
             cameraRunning.set(true)
-            diagnostics.log("CAMERA_STARTED publish=$publishToPeer")
+            Timber.tag("CAMERA_CAPTURE").i("CONTROL_CAMERA_CAPTURER_START %dx%d@%d", w, h, fps)
+            diagnostics.log("CONTROL_CAMERA_CAPTURER_START", peerConnection)
             Result.success(Unit)
         } catch (error: Throwable) {
-            Timber.e(error, "startFrontCamera failed")
-            runCatching { stopFrontCamera() }
+            Timber.tag("CAMERA_CAPTURE").e(error, "startControlCameraCapture failed")
+            runCatching { stopControlCameraCapture() }
+            Result.failure(error)
+        }
+    }
+
+    /** Stops capture but keeps negotiated AH_CAMERA track (no SDP change). */
+    @Synchronized
+    fun stopControlCameraCapture() {
+        controlFirstFrameSink?.let { sink ->
+            runCatching { localCameraTrack?.removeSink(sink) }
+        }
+        controlFirstFrameSink = null
+        if (!cameraRunning.getAndSet(false) && cameraCapturer == null) return
+        runCatching { (cameraCapturer as? CameraVideoCapturer)?.stopCapture() }
+        runCatching { cameraCapturer?.dispose() }
+        cameraCapturer = null
+        Timber.tag("CAMERA_CAPTURE").i("CONTROL_CAMERA_CAPTURER_STOP")
+        diagnostics.log("CONTROL_CAMERA_CAPTURER_STOP", peerConnection)
+    }
+
+    @Synchronized
+    fun disposeControlCameraSenderFully() {
+        stopControlCameraCapture()
+        localCameraTrack?.dispose()
+        localCameraTrack = null
+        cameraSource?.dispose()
+        cameraSource = null
+        cameraSurfaceHelper?.dispose()
+        cameraSurfaceHelper = null
+    }
+
+    /**
+     * REMOTE only: open local physical camera without publishing.
+     * Does NOT addTrack to PeerConnection.
+     */
+    @Synchronized
+    fun startRemoteLocalCameraOnly(): Result<Unit> {
+        if (isControlRole) return Result.success(Unit)
+        return try {
+            ensureInitialized()
+            if (remoteLocalCameraRunning.get()) return Result.success(Unit)
+            val (enumerator, deviceName) = selectCameraDevice()
+                ?: return Result.failure(IllegalStateException("EMULATOR_CAMERA_NOT_AVAILABLE or CAMERA_UNAVAILABLE"))
+            val capturer = enumerator.createCapturer(deviceName, null)
+                ?: return Result.failure(IllegalStateException("CAMERA_UNAVAILABLE"))
+            remoteLocalCameraCapturer = capturer
+            remoteLocalCameraHelper = SurfaceTextureHelper.create(
+                "RemoteLocalCamera",
+                ensureEglBase().eglBaseContext
+            )
+            remoteLocalCameraSource = factory!!.createVideoSource(false)
+            capturer.initialize(
+                remoteLocalCameraHelper,
+                context,
+                remoteLocalCameraSource!!.capturerObserver
+            )
+            capturer.startCapture(640, 480, 15)
+            remoteLocalCameraRunning.set(true)
+            Timber.tag("CAMERA_CAPTURE").i("REMOTE_CAMERA_OPENED_LOCAL_ONLY device=%s", deviceName)
+            Result.success(Unit)
+        } catch (error: Throwable) {
+            Timber.tag("CAMERA_CAPTURE").e(error, "startRemoteLocalCameraOnly failed")
+            runCatching { stopRemoteLocalCameraOnly() }
             Result.failure(error)
         }
     }
 
     @Synchronized
+    fun stopRemoteLocalCameraOnly() {
+        if (!remoteLocalCameraRunning.getAndSet(false) && remoteLocalCameraCapturer == null) return
+        runCatching { (remoteLocalCameraCapturer as? CameraVideoCapturer)?.stopCapture() }
+        runCatching { remoteLocalCameraCapturer?.dispose() }
+        remoteLocalCameraCapturer = null
+        remoteLocalCameraSource?.dispose()
+        remoteLocalCameraSource = null
+        remoteLocalCameraHelper?.dispose()
+        remoteLocalCameraHelper = null
+        Timber.tag("CAMERA_CAPTURE").i("REMOTE_CAMERA_LOCAL_ONLY_STOPPED")
+    }
+
+    private fun attachControlFirstFrameProbe() {
+        controlFirstFrameSink?.let { runCatching { localCameraTrack?.removeSink(it) } }
+        val probe = object : VideoSink {
+            private val seen = AtomicBoolean(false)
+            override fun onFrame(frame: VideoFrame) {
+                if (seen.compareAndSet(false, true)) {
+                    Timber.tag("CAMERA_CAPTURE").i("CONTROL_CAMERA_FIRST_FRAME")
+                    diagnostics.log("CONTROL_CAMERA_FIRST_FRAME", peerConnection)
+                }
+            }
+        }
+        controlFirstFrameSink = probe
+        localCameraTrack?.addSink(probe)
+    }
+
+    private fun selectCameraDevice(): Pair<CameraEnumerator, String>? {
+        val camera2 = Camera2Enumerator(context)
+        val names2 = camera2.deviceNames.toList()
+        Timber.tag("CAMERA_CAPTURE").i(
+            "Camera2 devices=%s front=%s",
+            names2,
+            names2.map { "$it front=${camera2.isFrontFacing(it)} back=${camera2.isBackFacing(it)}" }
+        )
+        pickPreferredCameraName(camera2, names2)?.let { return camera2 to it }
+
+        val camera1 = Camera1Enumerator(true)
+        val names1 = camera1.deviceNames.toList()
+        Timber.tag("CAMERA_CAPTURE").i("Camera1 fallback devices=%s", names1)
+        pickPreferredCameraName(camera1, names1)?.let { return camera1 to it }
+        return null
+    }
+
+    private fun pickPreferredCameraName(enumerator: CameraEnumerator, names: List<String>): String? {
+        if (names.isEmpty()) return null
+        return names.firstOrNull { name ->
+            enumerator.isFrontFacing(name) &&
+                !name.contains("virtual", ignoreCase = true) &&
+                !name.contains("scene", ignoreCase = true)
+        } ?: names.firstOrNull { enumerator.isFrontFacing(it) }
+            ?: names.firstOrNull {
+                !it.contains("virtual", ignoreCase = true) &&
+                    !it.contains("scene", ignoreCase = true)
+            }
+            ?: names.firstOrNull()
+    }
+
+    @Synchronized
     fun attachLocalCameraPreview(sink: VideoSink) {
         localCameraTrack?.addSink(sink)
+        Timber.tag("CAMERA_CAPTURE").i("CONTROL_CAMERA_LOCAL_RENDER sinkAttached=true")
     }
 
     @Synchronized
@@ -793,24 +992,24 @@ class PeerConnectionManager @Inject constructor(
         runCatching { localCameraTrack?.removeSink(sink) }
     }
 
-    @Synchronized
+    /** Compatibility wrapper — CONTROL publishes; REMOTE opens local-only. */
+    fun startFrontCamera(publishToPeer: Boolean, localPreview: VideoSink? = null): Result<Unit> {
+        return if (publishToPeer || isControlRole) {
+            startControlCameraCapture(localPreview)
+        } else {
+            startRemoteLocalCameraOnly()
+        }
+    }
+
     fun stopFrontCamera() {
-        if (!cameraRunning.getAndSet(false) && localCameraTrack == null) return
-        runCatching { (cameraCapturer as? CameraVideoCapturer)?.stopCapture() }
-        runCatching { cameraCapturer?.dispose() }
-        cameraCapturer = null
-        localCameraTrack?.dispose()
-        localCameraTrack = null
-        cameraSource?.dispose()
-        cameraSource = null
-        cameraSurfaceHelper?.dispose()
-        cameraSurfaceHelper = null
-        diagnostics.log("CAMERA_STOPPED")
+        stopControlCameraCapture()
+        stopRemoteLocalCameraOnly()
     }
 
     @Synchronized
     fun release() {
-        stopFrontCamera()
+        disposeControlCameraSenderFully()
+        stopRemoteLocalCameraOnly()
         stopScreenShare()
         closePeerOnly()
         peerGeneration++

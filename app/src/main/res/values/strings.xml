@@ -77,7 +77,7 @@
     <string name="select_remote">Control this phone</string>
     <string name="refresh_list">Refresh list</string>
 
-    <string name="permission_camera_required">Camera and microphone are required.</string>
+    <string name="permission_camera_required">Camera permission is required.</string>
     <string name="grant_permissions">Grant permissions</string>
     <string name="display_rule">Server connect/disconnect · Remote/Control/Nothing · When bound: full remote screen control · Busy remote is exclusive</string>
     <string name="screen_share_active">Screen share is active</string>
@@ -88,6 +88,11 @@
     <string name="stop_cameras">Stop cameras</string>
     <string name="waiting_control_camera">Waiting for Control camera…</string>
     <string name="camera_preview_placeholder">Your camera preview</string>
+    <string name="camera_capture_notif_title">Camera session</string>
+    <string name="camera_capture_notif_text">Control camera streaming for remote session</string>
+    <string name="camera_capture_channel_name">Camera capture</string>
+    <string name="camera_user_action_required">Open the app and tap Start cameras — Android requires user action to open the camera.</string>
+    <string name="camera_reconnect_required">Reconnect the session once so the Control camera video slot can be negotiated.</string>
 
     <string name="notif_channel_name">Link status</string>
     <string name="notif_channel_desc">Shows server connection and phone mode in the status bar</string>

@@ -239,6 +239,16 @@ fun SessionScreen(
                     text = stringResource(R.string.remote_camera_on_note),
                     style = MaterialTheme.typography.bodySmall
                 )
+                OutlinedButton(
+                    onClick = onStopCamera,
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text(stringResource(R.string.stop_cameras)) }
+            } else {
+                Button(
+                    onClick = { requestStartCamera() },
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = state.transportConnected
+                ) { Text(stringResource(R.string.start_cameras)) }
             }
         }
 

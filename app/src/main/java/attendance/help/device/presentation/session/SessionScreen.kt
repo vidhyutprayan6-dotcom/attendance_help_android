@@ -36,6 +36,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import attendance.help.device.R
+import attendance.help.device.BuildConfig
 import attendance.help.device.control.VideoCoordinateMapper
 import attendance.help.device.device.command.CommandTypes
 import attendance.help.device.domain.model.AppLinkSnapshot
@@ -126,6 +127,16 @@ fun SessionScreen(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.secondary
             )
+        }
+        if (state.transportConnected) {
+            Text(
+                text = "Transport: CONNECTED (video + data channel)",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.primary
+            )
+        }
+        if (BuildConfig.DEBUG && state.boundPeer != null) {
+            WebRtcDiagnosticPanel(state.webrtcDiagnostics)
         }
         Spacer(modifier = Modifier.height(8.dp))
 
@@ -300,6 +311,52 @@ fun SessionScreen(
         }
         OutlinedButton(onClick = onBack, modifier = Modifier.fillMaxWidth()) {
             Text(stringResource(R.string.back_action))
+        }
+    }
+}
+
+@Composable
+private fun WebRtcDiagnosticPanel(diag: attendance.help.device.domain.model.WebRtcTransportDiagnostics) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .padding(8.dp)
+    ) {
+        Text("WebRTC Diagnostics (debug)", style = MaterialTheme.typography.labelMedium)
+        Text("device=${diag.localDeviceId} remote=${diag.remoteDeviceId}", style = MaterialTheme.typography.bodySmall)
+        Text("session=${diag.sessionId} gen=${diag.peerGeneration} role=${diag.role}", style = MaterialTheme.typography.bodySmall)
+        Text("signaling=${diag.signalingState} gathering=${diag.iceGatheringState}", style = MaterialTheme.typography.bodySmall)
+        Text("ice=${diag.iceConnectionState} peer=${diag.connectionState} dc=${diag.dataChannelState}", style = MaterialTheme.typography.bodySmall)
+        Text(
+            "local ICE: host=${diag.localHostCandidates} srflx=${diag.localSrflxCandidates} relay=${diag.localRelayCandidates}",
+            style = MaterialTheme.typography.bodySmall
+        )
+        Text(
+            "remote ICE: host=${diag.remoteHostCandidates} srflx=${diag.remoteSrflxCandidates} relay=${diag.remoteRelayCandidates}",
+            style = MaterialTheme.typography.bodySmall
+        )
+        Text(
+            "TURN configured=${diag.turnConfigured} relayAvailable=${diag.turnRelayAvailable} forceRelayOnly=${diag.forceRelayOnly}",
+            style = MaterialTheme.typography.bodySmall
+        )
+        Text(
+            "remoteDesc=${diag.remoteDescriptionSet} queued=${diag.queuedRemoteCandidates} applied=${diag.appliedRemoteCandidates} failed=${diag.failedAddCandidateCalls}",
+            style = MaterialTheme.typography.bodySmall
+        )
+        Text(
+            "video=${if (diag.remoteVideoReceived) "RECEIVED" else "NOT_RECEIVED"} transport=${diag.transportConnected}",
+            style = MaterialTheme.typography.bodySmall
+        )
+        if (diag.lastIceError.isNotBlank()) {
+            Text("lastIceError=${diag.lastIceError}", style = MaterialTheme.typography.bodySmall, color = Color.Red)
+        }
+        if (diag.turnConfigured && diag.localRelayCandidates == 0 && diag.iceGatheringState == "COMPLETE") {
+            Text(
+                "TURN TEST FAILED: no relay ICE candidate gathered",
+                style = MaterialTheme.typography.bodySmall,
+                color = Color.Red
+            )
         }
     }
 }

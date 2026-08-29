@@ -19,6 +19,7 @@ android {
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("int", "SIGNALING_PORT", "8765")
+        buildConfigField("boolean", "FORCE_RELAY_ONLY", "false")
     }
 
     splits {
@@ -33,6 +34,8 @@ android {
     buildTypes {
         debug {
             isMinifyEnabled = false
+            // Set to true in Android Studio to test relay-only ICE (development diagnostic).
+            buildConfigField("boolean", "FORCE_RELAY_ONLY", "false")
         }
         release {
             isMinifyEnabled = true

@@ -12,4 +12,36 @@ Dual-phone attendance control over a **virtual hub server** (can run on one phon
 
 ## Build
 
-Open in Android Studio → Generate APKs → install `app-debug.apk` on both phones.
+Open in Android Studio → **Sync** → **Build → Build APK(s)**.
+
+With ABI splits enabled, install the correct APK per target:
+
+| Target | APK |
+|--------|-----|
+| LDPlayer (x86_64) | `app/build/outputs/apk/debug/app-x86_64-debug.apk` |
+| Physical phone (arm64) | `app/build/outputs/apk/debug/app-arm64-v8a-debug.apk` |
+
+Or build one ABI from terminal:
+
+```powershell
+.\gradlew.bat :app:assembleX86_64Debug
+```
+
+## Hub + TURN (LDPlayer testing)
+
+Start the hub with TURN configured (development OpenRelay):
+
+```powershell
+cd backend
+.\start-hub.bat
+```
+
+The batch file sets `TURN_URLS`, `TURN_USER`, and `TURN_CRED` read by `server.js`.
+
+## WebRTC debug
+
+Debug builds show a **WebRTC Diagnostics** panel on the session screen and log tag `WEBRTC_DIAG` in logcat.
+
+To test relay-only ICE, set in `app/build.gradle.kts` debug block:
+
+`buildConfigField("boolean", "FORCE_RELAY_ONLY", "true")`

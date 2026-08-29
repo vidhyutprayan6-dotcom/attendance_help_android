@@ -48,6 +48,39 @@ data class CaptureGeometry(
     val rotation: Int = 0
 )
 
+/** Debug / UI snapshot of WebRTC transport state. */
+data class WebRtcTransportDiagnostics(
+    val localDeviceId: String = "",
+    val remoteDeviceId: String = "",
+    val sessionId: String = "",
+    val role: String = "",
+    val peerGeneration: Int = 0,
+    val signalingState: String = "NEW",
+    val iceGatheringState: String = "NEW",
+    val iceConnectionState: String = "NEW",
+    val connectionState: String = "NEW",
+    val dataChannelState: String = "CLOSED",
+    val localHostCandidates: Int = 0,
+    val localSrflxCandidates: Int = 0,
+    val localRelayCandidates: Int = 0,
+    val remoteHostCandidates: Int = 0,
+    val remoteSrflxCandidates: Int = 0,
+    val remoteRelayCandidates: Int = 0,
+    val turnConfigured: Boolean = false,
+    val turnRelayAvailable: Boolean = false,
+    val forceRelayOnly: Boolean = false,
+    val remoteDescriptionSet: Boolean = false,
+    val localDescriptionSet: Boolean = false,
+    val queuedRemoteCandidates: Int = 0,
+    val appliedRemoteCandidates: Int = 0,
+    val failedAddCandidateCalls: Int = 0,
+    val remoteVideoReceived: Boolean = false,
+    val captureActive: Boolean = false,
+    val transportConnected: Boolean = false,
+    val lastIceError: String = "",
+    val lastDiagnosticEvent: String = ""
+)
+
 data class TurnServerConfig(
     val urls: List<String> = emptyList(),
     val username: String = "",
@@ -96,5 +129,7 @@ data class AppLinkSnapshot(
     val accessibilityEnabled: Boolean = false,
     val remoteSessionState: RemoteSessionState = RemoteSessionState.DISCONNECTED,
     val sessionId: String = "",
-    val captureGeometry: CaptureGeometry = CaptureGeometry()
+    val captureGeometry: CaptureGeometry = CaptureGeometry(),
+    val webrtcDiagnostics: WebRtcTransportDiagnostics = WebRtcTransportDiagnostics(),
+    val transportConnected: Boolean = false
 )

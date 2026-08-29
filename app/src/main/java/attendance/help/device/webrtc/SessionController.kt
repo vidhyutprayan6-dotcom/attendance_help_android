@@ -22,6 +22,7 @@ import attendance.help.device.domain.model.RemoteSessionState
 import attendance.help.device.domain.model.ServerLinkState
 import attendance.help.device.domain.model.SessionLinkState
 import attendance.help.device.domain.model.TurnServerConfig
+import attendance.help.device.domain.model.WebRtcTransportDiagnostics
 import attendance.help.device.domain.repository.SessionRepository
 import attendance.help.device.network.hub.HubClient
 import attendance.help.device.network.hub.HubMessage
@@ -142,6 +143,11 @@ class SessionController @Inject constructor(
                 }
             }
         }
+        Timber.i(
+            "SessionController deviceId=%s emulator=%s",
+            localDeviceId,
+            DeviceHints.isProbablyEmulator()
+        )
     }
 
     fun bindRenderer(screenRenderer: SurfaceViewRenderer?) {
@@ -485,6 +491,58 @@ class SessionController @Inject constructor(
         )
     }
 
+    private fun syncDiagnosticsContext() {
+        val role = when (_ui.value.mode) {
+            DeviceMode.REMOTE -> "REMOTE"
+            DeviceMode.CONTROL -> "CONTROL"
+            else -> "NONE"
+        }
+        peerConnectionManager.updateDiagnosticsContext(
+            localDeviceId = localDeviceId,
+            remoteDeviceId = boundPeerId.orEmpty(),
+            sessionId = activeSessionId,
+            role = role
+        )
+    }
+
+    private fun evaluateTransportState(diag: WebRtcTransportDiagnostics) {
+        val captureActive = diag.captureActive || _ui.value.screenShareActive
+        val connected = diag.transportConnected
+        val turnWarning = diag.turnConfigured && diag.localRelayCandidates == 0 &&
+            diag.iceGatheringState == "COMPLETE"
+        update {
+            copy(
+                webrtcDiagnostics = diag,
+                transportConnected = connected,
+                webrtcState = diag.connectionState,
+                screenShareActive = captureActive,
+                remoteSessionState = when {
+                    boundPeer == null -> RemoteSessionState.DISCONNECTED
+                    captureActive && connected -> RemoteSessionState.STREAMING
+                    captureActive -> RemoteSessionState.STARTING_STREAM
+                    boundPeer != null -> RemoteSessionState.WAITING
+                    else -> remoteSessionState
+                },
+                sessionLinkState = if (connected) SessionLinkState.STREAMING else sessionLinkState,
+                statusMessage = when {
+                    connected && mode == DeviceMode.CONTROL ->
+                        "Remote screen connected — touch to control"
+                    connected && mode == DeviceMode.REMOTE ->
+                        "Session connected — Control can see and operate this phone"
+                    turnWarning ->
+                        "TURN configured but no relay ICE candidate — check TURN reachability from this device"
+                    captureActive ->
+                        "WebRTC connecting — ICE ${diag.iceConnectionState} (local relay=${diag.localRelayCandidates})"
+                    else -> statusMessage
+                }
+            )
+        }
+        if (connected) {
+            webrtcRetryCount = 0
+            offerInFlight = false
+        }
+    }
+
     private fun webrtcLog(step: String) {
         WebRtcSignalingLog.log(
             step = step,
@@ -754,6 +812,7 @@ class SessionController @Inject constructor(
 
                         boundPeerId = peer.deviceId
                         sessionBoundAtMs = System.currentTimeMillis()
+                        syncDiagnosticsContext()
                         sessionRepository.setSessionLinkState(SessionLinkState.BOUND)
                         update {
                             copy(
@@ -955,8 +1014,26 @@ class SessionController @Inject constructor(
                             message.sdpMLineIndex ?: 0,
                             message.candidate
                         )
-                        if (!peerConnectionManager.addIceCandidate(candidate)) {
+                        if (!peerConnectionManager.addRemoteIceCandidate(candidate)) {
                             pendingIceCandidates.add(candidate)
+                        }
+                    }
+                }
+                is HubMessage.WebRtcReconnect -> {
+                    sessionMutex.withLock {
+                        if (!isValidRelayMessage(message.fromId, message.toId, message.sessionId)) {
+                            return@withLock
+                        }
+                        clearPendingIce()
+                        resetNegotiationState()
+                        inboundScreenTrack = null
+                        peerConnectionManager.teardownPeerForReconnect()
+                        peerCreated = false
+                        update {
+                            copy(
+                                statusMessage = "Peer requested WebRTC reconnect — waiting for new offer…",
+                                transportConnected = false
+                            )
                         }
                     }
                 }
@@ -1047,14 +1124,16 @@ class SessionController @Inject constructor(
 
             update {
                 copy(
-                    remoteSessionState = RemoteSessionState.STREAMING,
+                    remoteSessionState = RemoteSessionState.STARTING_STREAM,
                     needsScreenSharePermission = false,
                     screenShareActive = true,
                     captureGeometry = geom,
-                    statusMessage = "Screen sharing — Control can see and operate this phone",
+                    statusMessage = "Screen capture active — starting WebRTC…",
                     accessibilityEnabled = RemoteInputAccessibilityService.isEnabled()
                 )
             }
+
+            syncDiagnosticsContext()
 
             hubClient?.send(HubMessage.ScreenReady(fromId = localDeviceId, toId = peerId))
             beginRemoteOfferLocked()
@@ -1065,7 +1144,7 @@ class SessionController @Inject constructor(
         if (pendingIceCandidates.isEmpty()) return
         val copy = pendingIceCandidates.toList()
         pendingIceCandidates.clear()
-        copy.forEach { peerConnectionManager.addIceCandidate(it) }
+        copy.forEach { peerConnectionManager.addRemoteIceCandidate(it) }
     }
 
     private fun clearPendingIce() {
@@ -1073,6 +1152,7 @@ class SessionController @Inject constructor(
     }
 
     private fun ensurePeer(isControlDevice: Boolean, force: Boolean = false): Boolean {
+        syncDiagnosticsContext()
         val effectiveForce = force || !peerCreated
         if (effectiveForce) {
             webrtcLog("WEBRTC createPeerConnection")
@@ -1111,32 +1191,13 @@ class SessionController @Inject constructor(
         onConnectionChange = { state ->
             scope.launch {
                 Timber.i("WebRTC peer state -> %s", state)
-                update { copy(webrtcState = state.name) }
+                evaluateTransportState(peerConnectionManager.diagnosticsSnapshot())
                 when (state) {
-                    PeerConnection.PeerConnectionState.CONNECTED -> {
-                        webrtcRetryCount = 0
-                        offerInFlight = false
-                        sessionRepository.setSessionLinkState(SessionLinkState.STREAMING)
-                        update {
-                            copy(
-                                sessionLinkState = SessionLinkState.STREAMING,
-                                remoteSessionState = RemoteSessionState.STREAMING,
-                                statusMessage = if (mode == DeviceMode.CONTROL) {
-                                    "Remote screen connected — touch to control"
-                                } else {
-                                    "Screen sharing — Control can see and operate this phone"
-                                }
-                            )
-                        }
-                    }
                     PeerConnection.PeerConnectionState.FAILED -> {
                         handleWebRtcFailure("WebRTC connection failed")
                     }
                     PeerConnection.PeerConnectionState.DISCONNECTED -> {
-                        if (_ui.value.sessionLinkState == SessionLinkState.STREAMING) {
-                            update {
-                                copy(statusMessage = "Video connection lost — retrying…")
-                            }
+                        if (_ui.value.transportConnected) {
                             handleWebRtcFailure("WebRTC disconnected")
                         }
                     }
@@ -1146,6 +1207,9 @@ class SessionController @Inject constructor(
         },
         onIceConnectionChange = { iceState ->
             Timber.i("WebRTC ICE state -> %s", iceState)
+            if (iceState == PeerConnection.IceConnectionState.FAILED) {
+                scope.launch { handleWebRtcFailure("ICE connection failed") }
+            }
         },
         onDataMessage = { handleData(it) },
         onRemoteVideoTrack = { track ->
@@ -1154,15 +1218,11 @@ class SessionController @Inject constructor(
                 remoteRenderer?.let { r -> inboundScreenTrack?.removeSink(r) }
                 inboundScreenTrack = track
                 remoteRenderer?.let { track.addSink(it) }
-                if (_ui.value.webrtcState != PeerConnection.PeerConnectionState.CONNECTED.name) {
-                    update {
-                        copy(
-                            statusMessage = "Video track received — establishing connection…",
-                            screenShareActive = true
-                        )
-                    }
-                }
+                evaluateTransportState(peerConnectionManager.diagnosticsSnapshot())
             }
+        },
+        onDiagnosticsChanged = { diag ->
+            scope.launch { evaluateTransportState(diag) }
         }
     )
 
@@ -1170,50 +1230,68 @@ class SessionController @Inject constructor(
         if (handlingWebRtcFailure) return
         handlingWebRtcFailure = true
         try {
+            peerConnectionManager.diagnostics.logIceFailureReport(null)
             if (webrtcRetryCount >= 2) {
                 offerInFlight = false
                 update {
                     copy(
                         statusMessage = "$reason — tap Disconnect and try again",
-                        remoteSessionState = RemoteSessionState.WAITING
+                        remoteSessionState = if (screenShareActive) {
+                            RemoteSessionState.STARTING_STREAM
+                        } else {
+                            RemoteSessionState.WAITING
+                        }
                     )
                 }
                 return
             }
             webrtcRetryCount++
-            update { copy(statusMessage = "$reason — retrying ($webrtcRetryCount/2)…") }
-            when (_ui.value.mode) {
-                DeviceMode.REMOTE -> {
-                    delay(1_500)
-                    if (!peerConnectionManager.isLocalMediaPublishing()) {
-                        update {
-                            copy(statusMessage = "$reason — stop and restart screen share to retry")
-                        }
-                        return
-                    }
-                    when (peerConnectionManager.signalingState()) {
-                        PeerConnection.SignalingState.STABLE -> {
-                            offerInFlight = false
-                            beginRemoteOffer()
-                        }
-                        PeerConnection.SignalingState.HAVE_LOCAL_OFFER -> {
-                            update {
-                                copy(statusMessage = "$reason — waiting for Control answer…")
-                            }
-                        }
-                        else -> {
+            val peerId = boundPeerId
+            update { copy(statusMessage = "$reason — clean reconnect ($webrtcRetryCount/2)…") }
+            peerId?.let { id ->
+                hubClient?.send(
+                    HubMessage.WebRtcReconnect(
+                        fromId = localDeviceId,
+                        toId = id,
+                        sessionId = activeSessionId,
+                        peerGeneration = peerConnectionManager.currentPeerGeneration()
+                    )
+                )
+            }
+            sessionMutex.withLock {
+                clearPendingIce()
+                resetNegotiationState()
+                inboundScreenTrack = null
+                when (_ui.value.mode) {
+                    DeviceMode.REMOTE -> {
+                        if (!peerConnectionManager.isLocalMediaPublishing()) {
                             update {
                                 copy(statusMessage = "$reason — stop and restart screen share to retry")
                             }
+                            return@withLock
+                        }
+                        peerConnectionManager.teardownPeerForReconnect()
+                        peerCreated = false
+                        delay(800)
+                        if (!ensurePeer(isControlDevice = false, force = true)) {
+                            update { copy(statusMessage = "WebRTC reconnect failed — peer could not be recreated") }
+                            return@withLock
+                        }
+                        if (!peerConnectionManager.reattachScreenTrackToPeer()) {
+                            update { copy(statusMessage = "WebRTC reconnect failed — could not reattach screen track") }
+                            return@withLock
+                        }
+                        beginRemoteOfferLocked()
+                    }
+                    DeviceMode.CONTROL -> {
+                        peerConnectionManager.teardownPeerForReconnect()
+                        peerCreated = false
+                        update {
+                            copy(statusMessage = "$reason — waiting for Remote reconnect offer…")
                         }
                     }
+                    else -> Unit
                 }
-                DeviceMode.CONTROL -> {
-                    update {
-                        copy(statusMessage = "$reason — waiting for Remote to renegotiate…")
-                    }
-                }
-                else -> Unit
             }
         } finally {
             handlingWebRtcFailure = false

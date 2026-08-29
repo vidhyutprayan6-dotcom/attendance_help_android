@@ -117,6 +117,16 @@ sealed class HubMessage {
         override val type = TYPE_SCREEN_READY
     }
 
+    /** Peer notifies peer to tear down WebRTC and prepare for fresh offer/answer. */
+    data class WebRtcReconnect(
+        val fromId: String,
+        val toId: String,
+        val sessionId: String = "",
+        val peerGeneration: Int = 0
+    ) : HubMessage() {
+        override val type = TYPE_WEBRTC_RECONNECT
+    }
+
     data class ErrorMsg(val message: String) : HubMessage() {
         override val type = TYPE_ERROR
     }
@@ -137,6 +147,7 @@ sealed class HubMessage {
         const val TYPE_CAMERA_START = "camera_start"
         const val TYPE_CAMERA_STOP = "camera_stop"
         const val TYPE_SCREEN_READY = "screen_ready"
+        const val TYPE_WEBRTC_RECONNECT = "webrtc_reconnect"
         const val TYPE_ERROR = "error"
     }
 }
@@ -242,6 +253,14 @@ class HubCodec(private val gson: Gson = Gson()) {
                 o.addProperty("fromId", message.fromId)
                 o.addProperty("toId", message.toId)
             }
+            is HubMessage.WebRtcReconnect -> {
+                o.addProperty("fromId", message.fromId)
+                o.addProperty("toId", message.toId)
+                o.addProperty("sessionId", message.sessionId)
+                if (message.peerGeneration > 0) {
+                    o.addProperty("peerGeneration", message.peerGeneration)
+                }
+            }
             is HubMessage.ErrorMsg -> o.addProperty("message", message.message)
         }
         return gson.toJson(o)
@@ -341,6 +360,12 @@ class HubCodec(private val gson: Gson = Gson()) {
             HubMessage.TYPE_SCREEN_READY -> HubMessage.ScreenReady(
                 fromId = o.get("fromId").asString,
                 toId = o.get("toId").asString
+            )
+            HubMessage.TYPE_WEBRTC_RECONNECT -> HubMessage.WebRtcReconnect(
+                fromId = o.get("fromId").asString,
+                toId = o.get("toId").asString,
+                sessionId = o.get("sessionId")?.asString.orEmpty(),
+                peerGeneration = o.get("peerGeneration")?.asInt ?: 0
             )
             HubMessage.TYPE_ERROR -> HubMessage.ErrorMsg(o.get("message")?.asString ?: "error")
             else -> null

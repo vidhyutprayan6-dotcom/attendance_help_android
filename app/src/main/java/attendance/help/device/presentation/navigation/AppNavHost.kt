@@ -120,12 +120,18 @@ fun AppNavHost(startDestination: String) {
                 mode = vm.mode,
                 onBindRenderer = vm::bindRenderer,
                 onUnbindRenderer = vm::unbindRenderer,
+                onBindCameraRenderer = vm::bindCameraRenderer,
+                onUnbindCameraRenderer = vm::unbindCameraRenderer,
+                onBindLocalCameraPreview = vm::bindLocalCameraPreview,
+                onUnbindLocalCameraPreview = vm::unbindLocalCameraPreview,
                 onReleaseRemote = {
                     vm.releaseRemote()
                     navController.popBackStack()
                 },
                 onRequestScreenShare = vm::requestScreenShare,
                 onStopScreenShare = vm::stopScreenShare,
+                onStartCamera = vm::startCamera,
+                onStopCamera = vm::stopCamera,
                 onRefreshAccessibility = vm::refreshAccessibility,
                 onTap = vm::sendTap,
                 onSwipe = vm::sendSwipe,

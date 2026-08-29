@@ -80,6 +80,11 @@
     <string name="screen_share_active">مشاركة الشاشة نشطة</string>
     <string name="waiting_remote_screen">في انتظار شاشة البعيد…</string>
     <string name="screen_share_failed">فشلت مشاركة الشاشة: %1$s. اضغط السماح بمشاركة الشاشة للمحاولة مرة أخرى.</string>
+    <string name="transport_connected">الجلسة متصلة</string>
+    <string name="start_cameras">تشغيل الكاميرات</string>
+    <string name="stop_cameras">إيقاف الكاميرات</string>
+    <string name="waiting_control_camera">بانتظار كاميرا التحكم…</string>
+    <string name="camera_preview_placeholder">معاينة كاميرتك</string>
 
     <string name="notif_channel_name">حالة الربط</string>
     <string name="notif_channel_desc">يعرض اتصال الخادم ووضع الهاتف في شريط الحالة</string>

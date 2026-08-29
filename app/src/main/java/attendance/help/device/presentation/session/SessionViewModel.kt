@@ -27,9 +27,16 @@ class SessionViewModel @Inject constructor(
 
     fun bindRenderer(renderer: SurfaceViewRenderer?) = sessionController.bindRenderer(renderer)
     fun unbindRenderer() = sessionController.unbindRenderer()
+    fun bindCameraRenderer(renderer: SurfaceViewRenderer?) = sessionController.bindCameraRenderer(renderer)
+    fun unbindCameraRenderer() = sessionController.unbindCameraRenderer()
+    fun bindLocalCameraPreview(renderer: SurfaceViewRenderer?) =
+        sessionController.bindLocalCameraPreview(renderer)
+    fun unbindLocalCameraPreview() = sessionController.unbindLocalCameraPreview()
     fun releaseRemote() = sessionController.releaseRemoteControl()
     fun requestScreenShare() = sessionController.requestScreenSharePermission()
     fun stopScreenShare() = sessionController.stopRemoteScreenShare()
+    fun startCamera() = sessionController.startCameraSession()
+    fun stopCamera() = sessionController.stopCameraSession()
     fun refreshAccessibility() = sessionController.refreshAccessibilityState()
     fun sendTap(x: Float, y: Float) = sessionController.sendTap(x, y)
     fun sendSwipe(points: List<Pair<Float, Float>>, durationMs: Long) =

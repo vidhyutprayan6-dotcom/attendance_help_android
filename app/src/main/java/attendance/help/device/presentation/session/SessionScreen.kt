@@ -1,8 +1,12 @@
 package attendance.help.device.presentation.session
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.provider.Settings
 import android.view.MotionEvent
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -35,8 +39,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.content.ContextCompat
 import attendance.help.device.R
-import attendance.help.device.BuildConfig
 import attendance.help.device.control.VideoCoordinateMapper
 import attendance.help.device.device.command.CommandTypes
 import attendance.help.device.domain.model.AppLinkSnapshot
@@ -51,9 +55,15 @@ fun SessionScreen(
     mode: DeviceMode,
     onBindRenderer: (SurfaceViewRenderer?) -> Unit,
     onUnbindRenderer: () -> Unit,
+    onBindCameraRenderer: (SurfaceViewRenderer?) -> Unit,
+    onUnbindCameraRenderer: () -> Unit,
+    onBindLocalCameraPreview: (SurfaceViewRenderer?) -> Unit,
+    onUnbindLocalCameraPreview: () -> Unit,
     onReleaseRemote: () -> Unit,
     onRequestScreenShare: () -> Unit,
     onStopScreenShare: () -> Unit,
+    onStartCamera: () -> Unit,
+    onStopCamera: () -> Unit,
     onRefreshAccessibility: () -> Unit,
     onTap: (x: Float, y: Float) -> Unit,
     onSwipe: (points: List<Pair<Float, Float>>, durationMs: Long) -> Unit,
@@ -62,13 +72,38 @@ fun SessionScreen(
 ) {
     val context = LocalContext.current
     var screenRenderer by remember { mutableStateOf<SurfaceViewRenderer?>(null) }
+    var cameraRenderer by remember { mutableStateOf<SurfaceViewRenderer?>(null) }
+    var localPreviewRenderer by remember { mutableStateOf<SurfaceViewRenderer?>(null) }
     val sessionActive = state.boundPeer != null &&
         (state.sessionLinkState == SessionLinkState.BOUND ||
             state.sessionLinkState == SessionLinkState.STREAMING)
+    val camerasOn = state.dualCamera.isActive
+
+    val cameraPermission = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) onStartCamera()
+    }
+
+    fun requestStartCamera() {
+        val granted = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.CAMERA
+        ) == PackageManager.PERMISSION_GRANTED
+        if (granted) onStartCamera() else cameraPermission.launch(Manifest.permission.CAMERA)
+    }
 
     DisposableEffect(screenRenderer) {
         onBindRenderer(screenRenderer)
         onDispose { onUnbindRenderer() }
+    }
+    DisposableEffect(cameraRenderer) {
+        onBindCameraRenderer(cameraRenderer)
+        onDispose { onUnbindCameraRenderer() }
+    }
+    DisposableEffect(localPreviewRenderer) {
+        onBindLocalCameraPreview(localPreviewRenderer)
+        onDispose { onUnbindLocalCameraPreview() }
     }
 
     LaunchedEffect(Unit) { onRefreshAccessibility() }
@@ -121,22 +156,18 @@ fun SessionScreen(
         if (state.statusMessage.isNotBlank()) {
             Text(state.statusMessage, style = MaterialTheme.typography.bodyMedium)
         }
-        if (state.webrtcState.isNotBlank() && state.webrtcState != "CLOSED") {
+        if (state.transportConnected) {
+            Text(
+                text = stringResource(R.string.transport_connected),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.primary
+            )
+        } else if (state.webrtcState.isNotBlank() && state.webrtcState != "CLOSED") {
             Text(
                 text = "WebRTC: ${state.webrtcState}",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.secondary
             )
-        }
-        if (state.transportConnected) {
-            Text(
-                text = "Transport: CONNECTED (video + data channel)",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.primary
-            )
-        }
-        if (BuildConfig.DEBUG && state.boundPeer != null) {
-            WebRtcDiagnosticPanel(state.webrtcDiagnostics)
         }
         Spacer(modifier = Modifier.height(8.dp))
 
@@ -175,6 +206,39 @@ fun SessionScreen(
                     onClick = onStopScreenShare,
                     modifier = Modifier.fillMaxWidth()
                 ) { Text(stringResource(R.string.stop_screen_share)) }
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(stringResource(R.string.camera_feed_control_video), style = MaterialTheme.typography.titleMedium)
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(220.dp)
+                    .background(Color.Black)
+            ) {
+                AndroidView(
+                    factory = { ctx ->
+                        SurfaceViewRenderer(ctx).also { cameraRenderer = it }
+                    },
+                    modifier = Modifier.fillMaxSize(),
+                    onRelease = {
+                        cameraRenderer?.release()
+                        cameraRenderer = null
+                    }
+                )
+                if (!camerasOn) {
+                    Text(
+                        text = stringResource(R.string.waiting_control_camera),
+                        color = Color.White,
+                        modifier = Modifier.align(Alignment.Center)
+                    )
+                }
+            }
+            if (camerasOn) {
+                Text(
+                    text = stringResource(R.string.remote_camera_on_note),
+                    style = MaterialTheme.typography.bodySmall
+                )
             }
         }
 
@@ -293,6 +357,45 @@ fun SessionScreen(
                     modifier = Modifier.weight(1f)
                 ) { Text(stringResource(R.string.key_recents)) }
             }
+
+            Spacer(modifier = Modifier.height(12.dp))
+            Text(stringResource(R.string.session_control_camera), style = MaterialTheme.typography.titleMedium)
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(180.dp)
+                    .background(Color.DarkGray)
+            ) {
+                AndroidView(
+                    factory = { ctx ->
+                        SurfaceViewRenderer(ctx).also { localPreviewRenderer = it }
+                    },
+                    modifier = Modifier.fillMaxSize(),
+                    onRelease = {
+                        localPreviewRenderer?.release()
+                        localPreviewRenderer = null
+                    }
+                )
+                if (!camerasOn) {
+                    Text(
+                        text = stringResource(R.string.camera_preview_placeholder),
+                        color = Color.White,
+                        modifier = Modifier.align(Alignment.Center)
+                    )
+                }
+            }
+            if (!camerasOn) {
+                Button(
+                    onClick = { requestStartCamera() },
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = state.transportConnected
+                ) { Text(stringResource(R.string.start_cameras)) }
+            } else {
+                OutlinedButton(
+                    onClick = onStopCamera,
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text(stringResource(R.string.stop_cameras)) }
+            }
         }
 
         Spacer(modifier = Modifier.height(12.dp))
@@ -311,52 +414,6 @@ fun SessionScreen(
         }
         OutlinedButton(onClick = onBack, modifier = Modifier.fillMaxWidth()) {
             Text(stringResource(R.string.back_action))
-        }
-    }
-}
-
-@Composable
-private fun WebRtcDiagnosticPanel(diag: attendance.help.device.domain.model.WebRtcTransportDiagnostics) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(MaterialTheme.colorScheme.surfaceVariant)
-            .padding(8.dp)
-    ) {
-        Text("WebRTC Diagnostics (debug)", style = MaterialTheme.typography.labelMedium)
-        Text("device=${diag.localDeviceId} remote=${diag.remoteDeviceId}", style = MaterialTheme.typography.bodySmall)
-        Text("session=${diag.sessionId} gen=${diag.peerGeneration} role=${diag.role}", style = MaterialTheme.typography.bodySmall)
-        Text("signaling=${diag.signalingState} gathering=${diag.iceGatheringState}", style = MaterialTheme.typography.bodySmall)
-        Text("ice=${diag.iceConnectionState} peer=${diag.connectionState} dc=${diag.dataChannelState}", style = MaterialTheme.typography.bodySmall)
-        Text(
-            "local ICE: host=${diag.localHostCandidates} srflx=${diag.localSrflxCandidates} relay=${diag.localRelayCandidates}",
-            style = MaterialTheme.typography.bodySmall
-        )
-        Text(
-            "remote ICE: host=${diag.remoteHostCandidates} srflx=${diag.remoteSrflxCandidates} relay=${diag.remoteRelayCandidates}",
-            style = MaterialTheme.typography.bodySmall
-        )
-        Text(
-            "TURN configured=${diag.turnConfigured} relayAvailable=${diag.turnRelayAvailable} forceRelayOnly=${diag.forceRelayOnly}",
-            style = MaterialTheme.typography.bodySmall
-        )
-        Text(
-            "remoteDesc=${diag.remoteDescriptionSet} queued=${diag.queuedRemoteCandidates} applied=${diag.appliedRemoteCandidates} failed=${diag.failedAddCandidateCalls}",
-            style = MaterialTheme.typography.bodySmall
-        )
-        Text(
-            "video=${if (diag.remoteVideoReceived) "RECEIVED" else "NOT_RECEIVED"} transport=${diag.transportConnected}",
-            style = MaterialTheme.typography.bodySmall
-        )
-        if (diag.lastIceError.isNotBlank()) {
-            Text("lastIceError=${diag.lastIceError}", style = MaterialTheme.typography.bodySmall, color = Color.Red)
-        }
-        if (diag.turnConfigured && diag.localRelayCandidates == 0 && diag.iceGatheringState == "COMPLETE") {
-            Text(
-                "TURN TEST FAILED: no relay ICE candidate gathered",
-                style = MaterialTheme.typography.bodySmall,
-                color = Color.Red
-            )
         }
     }
 }

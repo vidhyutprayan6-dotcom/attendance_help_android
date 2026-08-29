@@ -1,0 +1,28 @@
+---
+description: Working WebRTC screen-share checkpoint and product camera rules
+alwaysApply: true
+---
+
+# Attendance Help — locked working state
+
+## Restore if camera/UI work breaks WebRTC
+- Branch: `checkpoint/webrtc-screen-ok`
+- Tag: `checkpoint-webrtc-screen-ok`
+- Doc: `docs/CHECKPOINT_WEBRTC_SCREEN.md`
+
+## Confirmed working (do not break)
+- REMOTE offers, CONTROL answers (initial PeerConnection)
+- Screen share: MediaProjection → VideoTrack → CONTROL SurfaceViewRenderer
+- DataChannel `"control"` created by REMOTE; CONTROL receives via onDataChannel
+- Session connected only when PeerConnection CONNECTED + DataChannel OPEN (+ CONTROL has video)
+
+## Camera product rules (next feature)
+1. Both cameras start/stop together when camera session is active
+2. CONTROL UI shows CONTROL's own local camera preview
+3. REMOTE UI shows CONTROL's camera stream (same face)
+4. REMOTE camera stays ON while session active (not shown on CONTROL in v1)
+5. Camera renegotiation may use CONTROL createOffer only for adding camera track — do not change initial screen-share offerer role
+
+## UI
+- Do not show WebRTC debug diagnostics panel in normal UI
+- STUN 701 timeouts are non-fatal when transport already CONNECTED

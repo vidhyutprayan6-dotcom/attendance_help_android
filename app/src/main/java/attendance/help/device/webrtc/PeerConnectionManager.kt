@@ -10,6 +10,8 @@ import attendance.help.device.domain.model.TurnServerConfig
 import attendance.help.device.domain.model.WebRtcTransportDiagnostics
 import attendance.help.device.utils.DeviceHints
 import dagger.hilt.android.qualifiers.ApplicationContext
+import org.webrtc.Camera2Enumerator
+import org.webrtc.CameraVideoCapturer
 import org.webrtc.DataChannel
 import org.webrtc.DefaultVideoDecoderFactory
 import org.webrtc.DefaultVideoEncoderFactory
@@ -32,6 +34,7 @@ import org.webrtc.SessionDescription
 import org.webrtc.SurfaceTextureHelper
 import org.webrtc.SurfaceViewRenderer
 import org.webrtc.VideoCapturer
+import org.webrtc.VideoSink
 import org.webrtc.VideoSource
 import org.webrtc.VideoTrack
 import timber.log.Timber
@@ -48,7 +51,10 @@ data class WebRtcListeners(
     val onConnectionChange: (PeerConnection.PeerConnectionState) -> Unit,
     val onIceConnectionChange: (PeerConnection.IceConnectionState) -> Unit = {},
     val onDataMessage: (String) -> Unit,
+    /** Remote screen VideoTrack (from Remote MediaProjection). */
     val onRemoteVideoTrack: (VideoTrack) -> Unit = {},
+    /** Control front-camera VideoTrack received on Remote. */
+    val onRemoteCameraTrack: (VideoTrack) -> Unit = {},
     val onDiagnosticsChanged: (WebRtcTransportDiagnostics) -> Unit = {}
 )
 
@@ -71,6 +77,11 @@ class PeerConnectionManager @Inject constructor(
     private var surfaceHelper: SurfaceTextureHelper? = null
     private var videoSource: VideoSource? = null
     private var localVideoTrack: VideoTrack? = null
+    private var cameraCapturer: VideoCapturer? = null
+    private var cameraSurfaceHelper: SurfaceTextureHelper? = null
+    private var cameraSource: VideoSource? = null
+    private var localCameraTrack: VideoTrack? = null
+    private val cameraRunning = AtomicBoolean(false)
     private var dataChannel: DataChannel? = null
     private var listeners: WebRtcListeners? = null
     private val mediaRunning = AtomicBoolean(false)
@@ -288,6 +299,18 @@ class PeerConnectionManager @Inject constructor(
 
             override fun onIceCandidateError(event: IceCandidateErrorEvent) {
                 if (!alive()) return
+                // STUN 701 timeouts are common and non-fatal when ICE already connected via host/srflx.
+                val connected = diagnostics.connectionState ==
+                    PeerConnection.PeerConnectionState.CONNECTED ||
+                    diagnostics.iceConnectionState == PeerConnection.IceConnectionState.CONNECTED ||
+                    diagnostics.iceConnectionState == PeerConnection.IceConnectionState.COMPLETED
+                if (connected && event.errorCode == 701) {
+                    Timber.tag("WEBRTC_DIAG").d(
+                        "Ignoring non-fatal STUN timeout while connected: %s",
+                        event.url
+                    )
+                    return
+                }
                 diagnostics.logIceCandidateError(event, pc())
                 notifyDiagnostics()
             }
@@ -311,9 +334,15 @@ class PeerConnectionManager @Inject constructor(
                 val track = receiver.track()
                 if (track is VideoTrack) {
                     track.setEnabled(true)
-                    diagnostics.remoteVideoReceived = true
-                    diagnostics.log("REMOTE_VIDEO_TRACK_RECEIVED id=${track.id()}", pc())
-                    mainHandler.post { listeners?.onRemoteVideoTrack(track) }
+                    val id = track.id().orEmpty()
+                    val isCamera = id.contains("CAMERA", ignoreCase = true)
+                    diagnostics.log("REMOTE_VIDEO_TRACK_RECEIVED id=$id camera=$isCamera", pc())
+                    if (isCamera) {
+                        mainHandler.post { listeners?.onRemoteCameraTrack(track) }
+                    } else {
+                        diagnostics.remoteVideoReceived = true
+                        mainHandler.post { listeners?.onRemoteVideoTrack(track) }
+                    }
                     notifyDiagnostics()
                 }
             }
@@ -697,9 +726,91 @@ class PeerConnectionManager @Inject constructor(
     fun isScreenSharing(): Boolean = sharingScreen && mediaRunning.get()
     fun isLocalMediaPublishing(): Boolean = mediaRunning.get()
     fun isDataChannelOpen(): Boolean = dataChannel?.state() == DataChannel.State.OPEN
+    fun isCameraRunning(): Boolean = cameraRunning.get()
+
+    /**
+     * Starts the front camera.
+     * @param publishToPeer if true, adds the track to PeerConnection (Control → Remote).
+     * @param localPreview optional sink for local preview (Control UI).
+     */
+    @Synchronized
+    fun startFrontCamera(
+        publishToPeer: Boolean,
+        localPreview: VideoSink? = null
+    ): Result<Unit> {
+        return try {
+            ensureInitialized()
+            if (cameraRunning.get()) {
+                localPreview?.let { sink -> localCameraTrack?.addSink(sink) }
+                return Result.success(Unit)
+            }
+            val enumerator = Camera2Enumerator(context)
+            val front = enumerator.deviceNames.firstOrNull { enumerator.isFrontFacing(it) }
+                ?: enumerator.deviceNames.firstOrNull()
+                ?: return Result.failure(IllegalStateException("No camera available"))
+            val capturer = enumerator.createCapturer(front, null)
+                ?: return Result.failure(IllegalStateException("Could not open camera"))
+            cameraCapturer = capturer
+            cameraSurfaceHelper = SurfaceTextureHelper.create(
+                "CameraCaptureThread",
+                ensureEglBase().eglBaseContext
+            )
+            cameraSource = factory!!.createVideoSource(false)
+            capturer.initialize(cameraSurfaceHelper, context, cameraSource!!.capturerObserver)
+            val (w, h, fps) = if (DeviceHints.isProbablyEmulator()) {
+                Triple(640, 480, 15)
+            } else {
+                Triple(640, 480, 24)
+            }
+            capturer.startCapture(w, h, fps)
+            localCameraTrack = factory!!.createVideoTrack("AH_CAMERA", cameraSource).apply {
+                setEnabled(true)
+            }
+            localPreview?.let { localCameraTrack?.addSink(it) }
+            if (publishToPeer) {
+                val pc = peerConnection
+                    ?: return Result.failure(IllegalStateException("Peer connection not ready"))
+                pc.addTrack(localCameraTrack, listOf("AH_CAMERA_STREAM"))
+                diagnostics.log("CAMERA_TRACK_PUBLISHED", pc)
+            }
+            cameraRunning.set(true)
+            diagnostics.log("CAMERA_STARTED publish=$publishToPeer")
+            Result.success(Unit)
+        } catch (error: Throwable) {
+            Timber.e(error, "startFrontCamera failed")
+            runCatching { stopFrontCamera() }
+            Result.failure(error)
+        }
+    }
+
+    @Synchronized
+    fun attachLocalCameraPreview(sink: VideoSink) {
+        localCameraTrack?.addSink(sink)
+    }
+
+    @Synchronized
+    fun detachLocalCameraPreview(sink: VideoSink) {
+        runCatching { localCameraTrack?.removeSink(sink) }
+    }
+
+    @Synchronized
+    fun stopFrontCamera() {
+        if (!cameraRunning.getAndSet(false) && localCameraTrack == null) return
+        runCatching { (cameraCapturer as? CameraVideoCapturer)?.stopCapture() }
+        runCatching { cameraCapturer?.dispose() }
+        cameraCapturer = null
+        localCameraTrack?.dispose()
+        localCameraTrack = null
+        cameraSource?.dispose()
+        cameraSource = null
+        cameraSurfaceHelper?.dispose()
+        cameraSurfaceHelper = null
+        diagnostics.log("CAMERA_STOPPED")
+    }
 
     @Synchronized
     fun release() {
+        stopFrontCamera()
         stopScreenShare()
         closePeerOnly()
         peerGeneration++

@@ -916,7 +916,7 @@ class PeerConnectionManager @Inject constructor(
             append("camRun=${cameraRunning.get()} ")
             append("camSender=${localCameraTrack?.id() ?: "none"} ")
             append("camAttached=${isControlCameraSenderAttached()} ")
-            append("inbound=${pollInboundCameraTrack()?.id ?: "none"}")
+            append("inbound=${pollInboundCameraTrack()?.id() ?: "none"}")
         }.trim()
     }
 

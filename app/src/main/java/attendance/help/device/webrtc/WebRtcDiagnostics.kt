@@ -145,10 +145,15 @@ class WebRtcDiagnostics {
         lastDiagnosticEvent = "ICE_FAILURE_REPORT"
     }
 
-    fun snapshot(): WebRtcTransportDiagnostics {
+    fun snapshot(peerConnectionPresent: Boolean = false): WebRtcTransportDiagnostics {
         val turnRelayAvailable = localRelayCandidates > 0
+        val iceOk = iceConnectionState == PeerConnection.IceConnectionState.CONNECTED ||
+            iceConnectionState == PeerConnection.IceConnectionState.COMPLETED
+        val peerOk = peerConnectionPresent &&
+            connectionState == PeerConnection.PeerConnectionState.CONNECTED
         val transportConnected =
-            connectionState == PeerConnection.PeerConnectionState.CONNECTED &&
+            peerOk &&
+                iceOk &&
                 dataChannelState == "OPEN" &&
                 (role != "CONTROL" || remoteVideoReceived)
         return WebRtcTransportDiagnostics(
@@ -178,6 +183,7 @@ class WebRtcDiagnostics {
             failedAddCandidateCalls = failedAddCandidateCalls,
             remoteVideoReceived = remoteVideoReceived,
             captureActive = captureActive,
+            peerConnectionPresent = peerConnectionPresent,
             transportConnected = transportConnected,
             lastIceError = lastIceError,
             lastDiagnosticEvent = lastDiagnosticEvent

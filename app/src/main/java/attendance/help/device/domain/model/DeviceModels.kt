@@ -76,6 +76,7 @@ data class WebRtcTransportDiagnostics(
     val failedAddCandidateCalls: Int = 0,
     val remoteVideoReceived: Boolean = false,
     val captureActive: Boolean = false,
+    val peerConnectionPresent: Boolean = false,
     val transportConnected: Boolean = false,
     val lastIceError: String = "",
     val lastDiagnosticEvent: String = ""

@@ -355,7 +355,8 @@ class SessionController @Inject constructor(
         while (cameraDebugLines.size > 10) cameraDebugLines.removeFirst()
         Timber.tag("CAMERA_SYNC").i(line)
         if (BuildConfig.DEBUG) {
-            val summary = peerConnectionManager.cameraDebugSummary()
+            val summary = runCatching { peerConnectionManager.cameraDebugSummary() }
+                .getOrElse { "debug unavailable: ${it.message}" }
             update {
                 copy(
                     cameraDebugLog = (cameraDebugLines + summary).joinToString("\n")
@@ -839,25 +840,34 @@ class SessionController @Inject constructor(
     }
 
     private fun evaluateTransportState(diag: WebRtcTransportDiagnostics) {
+        val peerPresent = peerConnectionManager.hasPeerConnection()
         val captureActive = diag.captureActive || _ui.value.screenShareActive
-        val connected = diag.transportConnected
+        val connected = peerPresent && diag.transportConnected
         val turnWarning = diag.turnConfigured && diag.localRelayCandidates == 0 &&
             diag.iceGatheringState == "COMPLETE"
         update {
             copy(
-                webrtcDiagnostics = diag,
+                webrtcDiagnostics = diag.copy(peerConnectionPresent = peerPresent),
                 transportConnected = connected,
-                webrtcState = diag.connectionState,
+                webrtcState = if (peerPresent) diag.connectionState else "NULL",
                 screenShareActive = captureActive,
                 remoteSessionState = when {
                     boundPeer == null -> RemoteSessionState.DISCONNECTED
+                    !peerPresent && captureActive -> RemoteSessionState.STARTING_STREAM
                     captureActive && connected -> RemoteSessionState.STREAMING
                     captureActive -> RemoteSessionState.STARTING_STREAM
                     boundPeer != null -> RemoteSessionState.WAITING
                     else -> remoteSessionState
                 },
-                sessionLinkState = if (connected) SessionLinkState.STREAMING else sessionLinkState,
+                sessionLinkState = when {
+                    connected -> SessionLinkState.STREAMING
+                    sessionLinkState == SessionLinkState.STREAMING && !peerPresent ->
+                        SessionLinkState.BOUND
+                    else -> sessionLinkState
+                },
                 statusMessage = when {
+                    !peerPresent && captureActive ->
+                        "WebRTC reconnecting — peer connection not ready"
                     connected && mode == DeviceMode.CONTROL ->
                         "Remote screen connected — touch to control"
                     connected && mode == DeviceMode.REMOTE ->
@@ -1814,6 +1824,7 @@ class SessionController @Inject constructor(
                         }
                         peerConnectionManager.teardownPeerForReconnect()
                         peerCreated = false
+                        update { copy(transportConnected = false, sessionLinkState = SessionLinkState.BOUND) }
                         delay(800)
                         if (!ensurePeer(isControlDevice = false, force = true)) {
                             update { copy(statusMessage = "WebRTC reconnect failed — peer could not be recreated") }
@@ -1829,7 +1840,11 @@ class SessionController @Inject constructor(
                         peerConnectionManager.teardownPeerForReconnect()
                         peerCreated = false
                         update {
-                            copy(statusMessage = "$reason — waiting for Remote reconnect offer…")
+                            copy(
+                                transportConnected = false,
+                                sessionLinkState = SessionLinkState.BOUND,
+                                statusMessage = "$reason — waiting for Remote reconnect offer…"
+                            )
                         }
                     }
                     else -> Unit

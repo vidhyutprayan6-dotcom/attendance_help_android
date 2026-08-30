@@ -1,6 +1,5 @@
 package attendance.help.device.presentation.welcome
 
-import androidx.appcompat.app.AppCompatDelegate
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -17,6 +16,10 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -25,11 +28,15 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import androidx.core.os.LocaleListCompat
 import attendance.help.device.R
+import attendance.help.device.utils.AppLocaleHelper
 
 @Composable
 fun WelcomeScreen(onContinue: () -> Unit) {
+    var selectedLanguage by rememberSaveable {
+        mutableStateOf(AppLocaleHelper.currentLanguageTag())
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -62,18 +69,34 @@ fun WelcomeScreen(onContinue: () -> Unit) {
         Text(stringResource(R.string.choose_language), style = MaterialTheme.typography.titleMedium)
         Spacer(modifier = Modifier.height(12.dp))
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            OutlinedButton(
-                onClick = {
-                    AppCompatDelegate.setApplicationLocales(LocaleListCompat.forLanguageTags("en"))
-                },
-                modifier = Modifier.weight(1f)
-            ) { Text(stringResource(R.string.language_english)) }
-            OutlinedButton(
-                onClick = {
-                    AppCompatDelegate.setApplicationLocales(LocaleListCompat.forLanguageTags("ar"))
-                },
-                modifier = Modifier.weight(1f)
-            ) { Text(stringResource(R.string.language_arabic)) }
+            if (selectedLanguage == "en") {
+                Button(
+                    onClick = { /* already selected */ },
+                    modifier = Modifier.weight(1f)
+                ) { Text(stringResource(R.string.language_english)) }
+            } else {
+                OutlinedButton(
+                    onClick = {
+                        AppLocaleHelper.setLanguage("en")
+                        selectedLanguage = "en"
+                    },
+                    modifier = Modifier.weight(1f)
+                ) { Text(stringResource(R.string.language_english)) }
+            }
+            if (selectedLanguage == "ar") {
+                Button(
+                    onClick = { /* already selected */ },
+                    modifier = Modifier.weight(1f)
+                ) { Text(stringResource(R.string.language_arabic)) }
+            } else {
+                OutlinedButton(
+                    onClick = {
+                        AppLocaleHelper.setLanguage("ar")
+                        selectedLanguage = "ar"
+                    },
+                    modifier = Modifier.weight(1f)
+                ) { Text(stringResource(R.string.language_arabic)) }
+            }
         }
         Spacer(modifier = Modifier.height(36.dp))
         Button(onClick = onContinue, modifier = Modifier.fillMaxWidth()) {

@@ -133,6 +133,4 @@ data class AppLinkSnapshot(
     val captureGeometry: CaptureGeometry = CaptureGeometry(),
     val webrtcDiagnostics: WebRtcTransportDiagnostics = WebRtcTransportDiagnostics(),
     val transportConnected: Boolean = false,
-    /** Rolling camera/WebRTC camera-path debug (debug builds). */
-    val cameraDebugLog: String = ""
 )

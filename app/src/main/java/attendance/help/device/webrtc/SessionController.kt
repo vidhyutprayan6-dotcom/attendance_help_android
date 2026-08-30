@@ -109,7 +109,6 @@ class SessionController @Inject constructor(
     private var inboundCameraTrack: VideoTrack? = null
     private var cameraSessionActive = false
     private var remoteCameraFirstFrame = false
-    private val cameraDebugLines = ArrayDeque<String>(12)
     private var remoteScreenReady = false
     private var sessionEpoch = 0
     private var sessionBoundAtMs: Long = 0L
@@ -350,19 +349,7 @@ class SessionController @Inject constructor(
     }
 
     private fun logCameraDebug(line: String) {
-        val stamped = "${System.currentTimeMillis() % 100_000}: $line"
-        cameraDebugLines.addLast(stamped)
-        while (cameraDebugLines.size > 10) cameraDebugLines.removeFirst()
         Timber.tag("CAMERA_SYNC").i(line)
-        if (BuildConfig.DEBUG) {
-            val summary = runCatching { peerConnectionManager.cameraDebugSummary() }
-                .getOrElse { "debug unavailable: ${it.message}" }
-            update {
-                copy(
-                    cameraDebugLog = (cameraDebugLines + summary).joinToString("\n")
-                )
-            }
-        }
     }
 
     /** CONTROL: FGS + start capture into camera track (pre-negotiated or pending Remote re-offer). */
@@ -476,14 +463,12 @@ class SessionController @Inject constructor(
         Timber.tag("CAMERA_SYNC").i("CAMERA_STOPPING")
         cameraSessionActive = false
         remoteCameraFirstFrame = false
-        cameraDebugLines.clear()
         peerConnectionManager.stopFrontCamera()
         runCatching { CameraCaptureService.stop(context) }
         cameraSessionManager.markStopped()
         update {
             copy(
                 dualCamera = DualCameraSessionState(),
-                cameraDebugLog = if (BuildConfig.DEBUG) peerConnectionManager.cameraDebugSummary() else "",
                 statusMessage = if (transportConnected) {
                     "Cameras stopped"
                 } else {

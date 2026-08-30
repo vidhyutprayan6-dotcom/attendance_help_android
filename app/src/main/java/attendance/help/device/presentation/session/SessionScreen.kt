@@ -40,7 +40,6 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
-import attendance.help.device.BuildConfig
 import attendance.help.device.R
 import attendance.help.device.control.VideoCoordinateMapper
 import attendance.help.device.device.command.CommandTypes
@@ -147,38 +146,14 @@ fun SessionScreen(
                 style = MaterialTheme.typography.titleMedium
             )
         }
-        if (state.remoteSessionState != RemoteSessionState.DISCONNECTED) {
-            Text(
-                text = "Session: ${state.remoteSessionState.name.replace('_', ' ')}",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.secondary
-            )
-        }
         if (state.statusMessage.isNotBlank()) {
             Text(state.statusMessage, style = MaterialTheme.typography.bodyMedium)
-        }
-        if (BuildConfig.DEBUG && state.cameraDebugLog.isNotBlank()) {
-            Text(
-                text = state.cameraDebugLog,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.tertiary,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(Color(0xFF1A1A1A))
-                    .padding(8.dp)
-            )
         }
         if (state.transportConnected) {
             Text(
                 text = stringResource(R.string.transport_connected),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.primary
-            )
-        } else if (state.webrtcState.isNotBlank() && state.webrtcState != "CLOSED") {
-            Text(
-                text = "WebRTC: ${state.webrtcState}",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.secondary
             )
         }
         Spacer(modifier = Modifier.height(8.dp))

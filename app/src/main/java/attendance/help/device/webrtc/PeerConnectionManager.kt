@@ -901,6 +901,9 @@ class PeerConnectionManager @Inject constructor(
         return attached
     }
 
+    private fun mediaTrackId(track: VideoTrack?): String =
+        runCatching { track?.id() ?: "none" }.getOrDefault("none")
+
     /** Short summary for on-screen camera debug — uses owned refs only (never enumerates transceivers). */
     fun cameraDebugSummary(): String {
         if (peerConnection == null) return "pc=null gen=$peerGeneration"
@@ -914,9 +917,9 @@ class PeerConnectionManager @Inject constructor(
             append("camRecvMid=${midOf(ownedCameraRecvTransceiver)} ")
             append("camSendMid=${midOf(ownedCameraSendTransceiver)} ")
             append("camRun=${cameraRunning.get()} ")
-            append("camSender=${localCameraTrack?.id() ?: "none"} ")
+            append("camSender=${mediaTrackId(localCameraTrack)} ")
             append("camAttached=${isControlCameraSenderAttached()} ")
-            append("inbound=${pollInboundCameraTrack()?.id() ?: "none"}")
+            append("inbound=${mediaTrackId(pollInboundCameraTrack())}")
         }.trim()
     }
 

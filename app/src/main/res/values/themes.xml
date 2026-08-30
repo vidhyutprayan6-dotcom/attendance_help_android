@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Theme.AttendanceHelp" parent="android:Theme.Material.Light.NoActionBar">
+    <style name="Theme.AttendanceHelp" parent="Theme.AppCompat.Light.NoActionBar">
         <item name="android:statusBarColor">@color/ah_primary</item>
         <item name="android:navigationBarColor">@color/ah_background</item>
         <item name="android:windowBackground">@color/ah_background</item>

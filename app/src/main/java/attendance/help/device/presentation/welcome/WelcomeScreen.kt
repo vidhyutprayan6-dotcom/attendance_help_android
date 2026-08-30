@@ -24,6 +24,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
@@ -33,10 +34,12 @@ import attendance.help.device.utils.AppLocaleHelper
 
 @Composable
 fun WelcomeScreen(onContinue: () -> Unit) {
+    val context = LocalContext.current
     var selectedLanguage by rememberSaveable {
-        mutableStateOf(AppLocaleHelper.currentLanguageTag())
+        mutableStateOf(AppLocaleHelper.currentLanguageTag(context))
     }
 
+    // Recompose entire screen when locale changes after activity recreate.
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -69,38 +72,52 @@ fun WelcomeScreen(onContinue: () -> Unit) {
         Text(stringResource(R.string.choose_language), style = MaterialTheme.typography.titleMedium)
         Spacer(modifier = Modifier.height(12.dp))
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            if (selectedLanguage == "en") {
-                Button(
-                    onClick = { /* already selected */ },
-                    modifier = Modifier.weight(1f)
-                ) { Text(stringResource(R.string.language_english)) }
-            } else {
-                OutlinedButton(
-                    onClick = {
-                        AppLocaleHelper.setLanguage("en")
+            LanguageButton(
+                label = stringResource(R.string.language_english),
+                selected = selectedLanguage == "en",
+                modifier = Modifier.weight(1f),
+                onClick = {
+                    if (selectedLanguage != "en") {
+                        AppLocaleHelper.setLanguage(context, "en")
                         selectedLanguage = "en"
-                    },
-                    modifier = Modifier.weight(1f)
-                ) { Text(stringResource(R.string.language_english)) }
-            }
-            if (selectedLanguage == "ar") {
-                Button(
-                    onClick = { /* already selected */ },
-                    modifier = Modifier.weight(1f)
-                ) { Text(stringResource(R.string.language_arabic)) }
-            } else {
-                OutlinedButton(
-                    onClick = {
-                        AppLocaleHelper.setLanguage("ar")
+                    }
+                }
+            )
+            LanguageButton(
+                label = stringResource(R.string.language_arabic),
+                selected = selectedLanguage == "ar",
+                modifier = Modifier.weight(1f),
+                onClick = {
+                    if (selectedLanguage != "ar") {
+                        AppLocaleHelper.setLanguage(context, "ar")
                         selectedLanguage = "ar"
-                    },
-                    modifier = Modifier.weight(1f)
-                ) { Text(stringResource(R.string.language_arabic)) }
-            }
+                    }
+                }
+            )
         }
         Spacer(modifier = Modifier.height(36.dp))
-        Button(onClick = onContinue, modifier = Modifier.fillMaxWidth()) {
+        Button(
+            onClick = {
+                AppLocaleHelper.setLanguage(context, selectedLanguage)
+                onContinue()
+            },
+            modifier = Modifier.fillMaxWidth()
+        ) {
             Text(stringResource(R.string.continue_action))
         }
+    }
+}
+
+@Composable
+private fun LanguageButton(
+    label: String,
+    selected: Boolean,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    if (selected) {
+        Button(onClick = onClick, modifier = modifier) { Text(label) }
+    } else {
+        OutlinedButton(onClick = onClick, modifier = modifier) { Text(label) }
     }
 }

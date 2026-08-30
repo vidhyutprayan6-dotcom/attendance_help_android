@@ -1,14 +1,15 @@
 package attendance.help.device.presentation
 
 import android.Manifest
+import android.content.Context
 import android.content.pm.PackageManager
 import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.Bundle
-import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AppCompatActivity
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.getValue
@@ -23,6 +24,7 @@ import attendance.help.device.domain.repository.SessionRepository
 import attendance.help.device.presentation.navigation.AppNavHost
 import attendance.help.device.presentation.navigation.Routes
 import attendance.help.device.presentation.theme.AttendanceHelpTheme
+import attendance.help.device.utils.AppLocaleHelper
 import attendance.help.device.webrtc.SessionController
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.Dispatchers
@@ -32,7 +34,7 @@ import kotlinx.coroutines.withContext
 import javax.inject.Inject
 
 @AndroidEntryPoint
-class MainActivity : ComponentActivity() {
+class MainActivity : AppCompatActivity() {
 
     @Inject lateinit var sessionRepository: SessionRepository
     @Inject lateinit var sessionController: SessionController
@@ -55,6 +57,11 @@ class MainActivity : ComponentActivity() {
         ActivityResultContracts.RequestPermission()
     ) { /* ongoing notification may still work as FGS on some OEMs */ }
 
+    override fun attachBaseContext(newBase: Context) {
+        AppLocaleHelper.syncDelegateWithStoredPreference(newBase)
+        super.attachBaseContext(newBase)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -70,7 +77,7 @@ class MainActivity : ComponentActivity() {
             val link = withContext(Dispatchers.IO) {
                 sessionRepository.serverLinkState.first()
             }
-            if (link == ServerLinkState.CONNECTED) {
+            if (link == ServerLinkState.CONNECTED && AppLocaleHelper.hasSavedLanguage(this@MainActivity)) {
                 startRoute = Routes.Home
             }
         }

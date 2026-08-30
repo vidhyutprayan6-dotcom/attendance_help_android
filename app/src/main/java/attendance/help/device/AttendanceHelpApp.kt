@@ -1,7 +1,6 @@
 package attendance.help.device
 
 import android.app.Application
-import attendance.help.device.utils.AppLocaleHelper
 import dagger.hilt.android.HiltAndroidApp
 import timber.log.Timber
 
@@ -20,7 +19,6 @@ class AttendanceHelpApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
-        AppLocaleHelper.syncOnLaunch()
         if (BuildConfig.DEBUG) {
             Timber.plant(Timber.DebugTree())
         }

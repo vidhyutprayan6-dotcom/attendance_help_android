@@ -1,12 +1,11 @@
 package attendance.help.device.presentation
 
 import android.Manifest
-import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.Bundle
-import androidx.appcompat.app.AppCompatActivity
+import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
@@ -26,18 +25,21 @@ import attendance.help.device.presentation.navigation.Routes
 import attendance.help.device.presentation.theme.AttendanceHelpTheme
 import attendance.help.device.webrtc.SessionController
 import dagger.hilt.android.AndroidEntryPoint
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import javax.inject.Inject
 
 @AndroidEntryPoint
-class MainActivity : AppCompatActivity() {
+class MainActivity : ComponentActivity() {
 
     @Inject lateinit var sessionRepository: SessionRepository
     @Inject lateinit var sessionController: SessionController
     @Inject lateinit var screenShareCoordinator: ScreenShareCoordinator
 
-    private var startRoute by mutableStateOf<String?>(null)
+    /** Show welcome immediately — never block the UI thread waiting for preferences. */
+    private var startRoute by mutableStateOf(Routes.Welcome)
 
     private val screenCaptureLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -65,20 +67,18 @@ class MainActivity : AppCompatActivity() {
         sessionController.restoreStatusBarIfNeeded()
 
         lifecycleScope.launch {
-            val link = sessionRepository.serverLinkState.first()
-            startRoute = when {
-                link == ServerLinkState.CONNECTED -> Routes.Home
-                else -> Routes.Welcome
+            val link = withContext(Dispatchers.IO) {
+                sessionRepository.serverLinkState.first()
+            }
+            if (link == ServerLinkState.CONNECTED) {
+                startRoute = Routes.Home
             }
         }
 
         setContent {
             AttendanceHelpTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
-                    val route = startRoute
-                    if (route != null) {
-                        AppNavHost(startDestination = route)
-                    }
+                    AppNavHost(startDestination = startRoute)
                 }
             }
         }

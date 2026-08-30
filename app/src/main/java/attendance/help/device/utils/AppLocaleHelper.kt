@@ -9,19 +9,7 @@ object AppLocaleHelper {
 
     private val supportedTags = setOf("en", "ar")
 
-    /**
-     * Call from [android.app.Application.onCreate] before any UI is shown.
-     * Restores a saved locale, or follows the device language on first launch.
-     */
-    fun syncOnLaunch() {
-        val stored = AppCompatDelegate.getApplicationLocales()
-        if (!stored.isEmpty) return
-
-        val deviceLang = Locale.getDefault().language.lowercase(Locale.ROOT)
-        val initialTag = if (deviceLang in supportedTags) deviceLang else "en"
-        AppCompatDelegate.setApplicationLocales(LocaleListCompat.forLanguageTags(initialTag))
-    }
-
+    /** Apply when the user picks a language on the welcome screen (never during Application.onCreate). */
     fun setLanguage(languageTag: String) {
         val tag = if (languageTag in supportedTags) languageTag else "en"
         AppCompatDelegate.setApplicationLocales(LocaleListCompat.forLanguageTags(tag))

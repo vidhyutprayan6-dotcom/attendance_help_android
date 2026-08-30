@@ -124,10 +124,16 @@ class SessionController @Inject constructor(
     private var touchDownX: Float? = null
     private var touchDownY: Float? = null
 
-    private val _ui = MutableStateFlow(AppLinkSnapshot(localDeviceId = localDeviceId))
+    private val _ui = MutableStateFlow(AppLinkSnapshot())
     val uiState: StateFlow<AppLinkSnapshot> = _ui.asStateFlow()
 
     init {
+        scope.launch(Dispatchers.IO) {
+            val id = deviceIdentityProvider.getOrCreateDeviceId()
+            withContext(Dispatchers.Main) {
+                update { copy(localDeviceId = id) }
+            }
+        }
         ScreenShareService.stopCallback = { scope.launch { stopRemoteScreenShare(fromNotification = true) } }
         startPresenceHeartbeat()
         scope.launch {

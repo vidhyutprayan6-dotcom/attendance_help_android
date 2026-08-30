@@ -598,7 +598,7 @@ class PeerConnectionManager @Inject constructor(
                 params.degradationPreference = RtpParameters.DegradationPreference.MAINTAIN_FRAMERATE
                 if (params.encodings.isNotEmpty()) {
                     params.encodings[0].maxBitrateBps = 1_200_000
-                    params.encodings[0].maxFramerate = fps.toDouble()
+                    params.encodings[0].maxFramerate = fps
                 }
                 tx.sender.parameters = params
                 diagnostics.log("SCREEN_SENDER_TUNED maxBitrate=1200000 fps=$fps", pc)

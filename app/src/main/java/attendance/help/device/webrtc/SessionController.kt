@@ -108,7 +108,6 @@ class SessionController @Inject constructor(
     private var localCameraPreview: SurfaceViewRenderer? = null
     private var inboundCameraTrack: VideoTrack? = null
     private var cameraSessionActive = false
-    private var cameraRenegotiateAttempts = 0
     private var remoteCameraFirstFrame = false
     private val cameraDebugLines = ArrayDeque<String>(12)
     private var remoteScreenReady = false
@@ -292,7 +291,7 @@ class SessionController @Inject constructor(
                         )
                     }
                     DeviceMode.REMOTE -> {
-                        // Ask Control to open published camera; open local sensor optionally.
+                        // Remote always notifies Control first — Control camera must auto-start.
                         hubClient?.send(
                             HubMessage.CameraStart(fromId = localDeviceId, toId = peerId)
                         )
@@ -307,7 +306,7 @@ class SessionController @Inject constructor(
                         }
                         cameraSessionActive = true
                         cameraSessionManager.markActive()
-                        ensureCameraReceivePathLocked()
+                        waitForControlCameraTrackLocked()
                         update {
                             copy(
                                 dualCamera = DualCameraSessionState(
@@ -316,13 +315,10 @@ class SessionController @Inject constructor(
                                     controlShowsRemoteFeed = true,
                                     remoteShowsControlFeed = inboundCameraTrack != null
                                 ),
-                                statusMessage = if (inboundCameraTrack != null) {
-                                    "Cameras active — Control camera received"
-                                } else {
-                                    "Cameras on — waiting for Control camera video…"
-                                }
+                                statusMessage = cameraStatusMessageLocked()
                             )
                         }
+                        scheduleRemoteCameraTrackPoll()
                     }
                     else -> {
                         cameraSessionManager.markError("INVALID_ROLE")
@@ -399,7 +395,7 @@ class SessionController @Inject constructor(
             "CONTROL_CAMERA_CAPTURER_START attached=${peerConnectionManager.isControlCameraSenderAttached()}"
         )
         if (!peerConnectionManager.isControlCameraSenderAttached()) {
-            logCameraDebug("WARN sender not attached — waiting for Remote re-offer")
+            logCameraDebug("WARN sender not attached — reconnect session once")
         }
         cameraSessionActive = true
         cameraSessionManager.markActive()
@@ -407,32 +403,58 @@ class SessionController @Inject constructor(
     }
 
     /**
-     * REMOTE only: if Control camera track is not inbound yet, add RECV slot and re-offer.
-     * Keeps Remote as sole offerer (screen + camera m-lines). Safe while already CONNECTED.
+     * REMOTE: wait for inbound Control camera — never re-offer while CONNECTED
+     * (re-offer disposes transceivers → "RtpTransceiver has been disposed").
      */
-    private fun ensureCameraReceivePathLocked() {
+    private fun waitForControlCameraTrackLocked() {
         if (_ui.value.mode != DeviceMode.REMOTE) return
-        if (inboundCameraTrack != null) {
-            Timber.tag("CAMERA_WEBRTC").i("camera receive path OK — inbound track present")
+        peerConnectionManager.pollInboundCameraTrack()?.let { track ->
+            logCameraDebug("pollInboundCameraTrack id=${track.id()}")
+            attachInboundCameraTrackLocked(track)
             return
         }
-        peerConnectionManager.ensureRemoteCameraReceiverSlot()
-        peerConnectionManager.logTransceiverState("REMOTE_CAMERA_ENSURE")
-        if (offerInFlight) {
-            Timber.tag("CAMERA_WEBRTC").i("camera renegotiate deferred — offer in flight")
-            return
-        }
-        if (cameraRenegotiateAttempts >= 2) {
-            Timber.tag("CAMERA_WEBRTC").w("camera renegotiate attempts exhausted")
+        if (!peerConnectionManager.hasRemoteCameraReceiveSlot()) {
+            logCameraDebug("WARN camera slot missing — reconnect session")
             update {
-                copy(statusMessage = "Control camera not received — stop/start cameras or reconnect")
+                copy(
+                    statusMessage = context.getString(R.string.camera_reconnect_required)
+                )
             }
-            return
         }
-        cameraRenegotiateAttempts++
-        logCameraDebug("CAMERA_SLOT_RENEGOTIATE attempt=$cameraRenegotiateAttempts")
-        update { copy(statusMessage = "Negotiating Control camera video…") }
-        beginRemoteOfferLocked()
+    }
+
+    private fun cameraStatusMessageLocked(): String {
+        return when {
+            inboundCameraTrack != null && remoteCameraFirstFrame ->
+                "Control camera video playing"
+            inboundCameraTrack != null ->
+                "Control camera track received — waiting for frames…"
+            peerConnectionManager.hasRemoteCameraReceiveSlot() ->
+                "Cameras on — waiting for Control camera video…"
+            else ->
+                context.getString(R.string.camera_reconnect_required)
+        }
+    }
+
+    /** Poll for Control camera track without SDP renegotiation. */
+    private fun scheduleRemoteCameraTrackPoll() {
+        scope.launch {
+            repeat(8) {
+                delay(1_500)
+                sessionMutex.withLock {
+                    if (!cameraSessionActive || inboundCameraTrack != null) return@withLock
+                    waitForControlCameraTrackLocked()
+                    if (inboundCameraTrack != null) {
+                        update {
+                            copy(
+                                dualCamera = dualCamera.copy(remoteShowsControlFeed = true),
+                                statusMessage = cameraStatusMessageLocked()
+                            )
+                        }
+                    }
+                }
+            }
+        }
     }
 
     private fun markCameraUiActiveLocked(message: String) {
@@ -452,7 +474,6 @@ class SessionController @Inject constructor(
     private fun stopCamerasLocallyLocked() {
         Timber.tag("CAMERA_SYNC").i("CAMERA_STOPPING")
         cameraSessionActive = false
-        cameraRenegotiateAttempts = 0
         remoteCameraFirstFrame = false
         cameraDebugLines.clear()
         peerConnectionManager.stopFrontCamera()
@@ -871,8 +892,9 @@ class SessionController @Inject constructor(
             onDone = {
                 webrtcLog("WEBRTC setRemoteOffer success")
                 flushPendingIceCandidates()
-                // Attach CONTROL camera sender track before answer so SDP includes camera send m-line.
-                peerConnectionManager.ensureControlCameraSenderReady()
+                // Attach CONTROL camera sender track before answer (initial session only).
+                runCatching { peerConnectionManager.ensureControlCameraSenderReady() }
+                    .onFailure { Timber.e(it, "ensureControlCameraSenderReady before answer") }
                 webrtcLog("WEBRTC createAnswer")
                 peerConnectionManager.createAnswer(
                     onSuccess = { answer ->
@@ -894,12 +916,14 @@ class SessionController @Inject constructor(
                         )
                         flushPendingIceCandidates()
                         if (_ui.value.mode == DeviceMode.CONTROL && cameraSessionActive) {
-                            peerConnectionManager.reattachControlCameraSenderAfterNegotiation()
-                            localCameraPreview?.let { preview ->
-                                peerConnectionManager.attachLocalCameraPreview(preview)
-                            }
+                            runCatching {
+                                peerConnectionManager.reattachControlCameraSenderAfterNegotiation()
+                                localCameraPreview?.let { preview ->
+                                    peerConnectionManager.attachLocalCameraPreview(preview)
+                                }
+                            }.onFailure { Timber.e(it, "Control camera reattach after answer") }
                             logCameraDebug(
-                                "CONTROL reattached after answer attached=" +
+                                "CONTROL reattached attached=" +
                                     peerConnectionManager.isControlCameraSenderAttached()
                             )
                         }
@@ -1324,16 +1348,14 @@ class SessionController @Inject constructor(
                                 peerConnectionManager.logTransceiverState("REMOTE_AFTER_ANSWER")
                                 scope.launch {
                                     sessionMutex.withLock {
-                                        if (cameraSessionActive && inboundCameraTrack == null) {
-                                            peerConnectionManager.pollInboundCameraTrack()?.let { track ->
-                                                logCameraDebug("pollInboundCameraTrack id=${track.id()}")
-                                                attachInboundCameraTrackLocked(track)
+                                        if (cameraSessionActive) {
+                                            waitForControlCameraTrackLocked()
+                                            if (inboundCameraTrack != null) {
+                                                rebindInboundCameraRendererLocked()
+                                                update {
+                                                    copy(statusMessage = cameraStatusMessageLocked())
+                                                }
                                             }
-                                            if (inboundCameraTrack == null) {
-                                                ensureCameraReceivePathLocked()
-                                            }
-                                        } else if (cameraSessionActive && inboundCameraTrack != null) {
-                                            rebindInboundCameraRendererLocked()
                                         }
                                     }
                                 }
@@ -1407,21 +1429,30 @@ class SessionController @Inject constructor(
                         )
                         when (_ui.value.mode) {
                             DeviceMode.CONTROL -> {
+                                // Control camera must auto-start whenever Remote (or peer) requests cameras.
                                 if (!cameraSessionManager.beginStart(cmd)) {
-                                    // Already active — peer just syncing
-                                    if (cameraSessionActive) return@withLock
+                                    Timber.tag("CAMERA_SYNC").i(
+                                        "CAMERA_START while active — re-sync Control camera"
+                                    )
                                 } else {
                                     cameraSessionManager.markPreparing()
                                 }
                                 val ok = activateControlCameraLocked()
                                 if (ok) {
-                                    markCameraUiActiveLocked("Cameras active — Control camera streaming")
+                                    markCameraUiActiveLocked(
+                                        if (peerConnectionManager.isControlCameraSenderAttached()) {
+                                            "Cameras active — Control camera streaming"
+                                        } else {
+                                            context.getString(R.string.camera_reconnect_required)
+                                        }
+                                    )
                                 }
                             }
                             DeviceMode.REMOTE -> {
                                 if (!cameraSessionManager.beginStart(cmd)) {
                                     if (cameraSessionActive) {
-                                        ensureCameraReceivePathLocked()
+                                        waitForControlCameraTrackLocked()
+                                        scheduleRemoteCameraTrackPoll()
                                         return@withLock
                                     }
                                 } else {
@@ -1432,7 +1463,8 @@ class SessionController @Inject constructor(
                                 }
                                 cameraSessionActive = true
                                 cameraSessionManager.markActive()
-                                ensureCameraReceivePathLocked()
+                                waitForControlCameraTrackLocked()
+                                scheduleRemoteCameraTrackPoll()
                                 update {
                                     copy(
                                         dualCamera = DualCameraSessionState(
@@ -1441,14 +1473,13 @@ class SessionController @Inject constructor(
                                             controlShowsRemoteFeed = true,
                                             remoteShowsControlFeed = inboundCameraTrack != null
                                         ),
-                                        statusMessage = when {
-                                            inboundCameraTrack != null ->
-                                                "Cameras active — Control camera received"
-                                            localOnly.isFailure ->
-                                                "Cameras on — negotiating Control camera…"
-                                            else ->
-                                                "Cameras on — waiting for Control camera video…"
-                                        }
+                                        statusMessage = cameraStatusMessageLocked()
+                                    )
+                                }
+                                if (localOnly.isFailure) {
+                                    Timber.tag("CAMERA_CAPTURE").w(
+                                        "REMOTE local camera optional failed: %s",
+                                        localOnly.exceptionOrNull()?.message
                                     )
                                 }
                             }
@@ -1720,7 +1751,6 @@ class SessionController @Inject constructor(
         track.addSink(firstFrame)
         rebindInboundCameraRendererLocked()
         if (cameraSessionActive) {
-            cameraRenegotiateAttempts = 0
             update {
                 copy(
                     dualCamera = dualCamera.copy(

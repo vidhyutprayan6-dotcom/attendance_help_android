@@ -85,6 +85,7 @@
     <string name="stop_cameras">إيقاف الكاميرات</string>
     <string name="waiting_control_camera">بانتظار كاميرا التحكم…</string>
     <string name="camera_preview_placeholder">معاينة كاميرتك</string>
+    <string name="camera_reconnect_required">أعد الاتصال بالجلسة مرة واحدة حتى يمكن التفاوض على مسار فيديو كاميرا التحكم.</string>
 
     <string name="notif_channel_name">حالة الربط</string>
     <string name="notif_channel_desc">يعرض اتصال الخادم ووضع الهاتف في شريط الحالة</string>

@@ -30,6 +30,7 @@ import org.webrtc.RtpTransceiver.RtpTransceiverInit
 import org.webrtc.PeerConnectionFactory
 import org.webrtc.RTCStatsCollectorCallback
 import org.webrtc.RTCStatsReport
+import org.webrtc.RtpParameters
 import org.webrtc.RtpReceiver
 import org.webrtc.ScreenCapturerAndroid
 import org.webrtc.SdpObserver
@@ -579,13 +580,44 @@ class PeerConnectionManager @Inject constructor(
         return if (DeviceHints.isProbablyEmulator()) {
             Triple(640, 480, 15)
         } else {
+            // Lower resolution/framerate improves latency over cloud/TURN paths.
             Triple(
-                even(min(dm.widthPixels, 1280)),
-                even(min(dm.heightPixels, 720)),
-                24
+                even(min(dm.widthPixels, 960)),
+                even(min(dm.heightPixels, 540)),
+                20
             )
         }
     }
+
+    private fun tuneScreenVideoSender(pc: PeerConnection, fps: Int) {
+        val trackId = localVideoTrack?.id() ?: return
+        safeVideoTransceivers(pc).forEach { tx ->
+            if (tx.sender.track()?.id() != trackId) return@forEach
+            runCatching {
+                val params = tx.sender.parameters
+                params.degradationPreference = RtpParameters.DegradationPreference.MAINTAIN_FRAMERATE
+                if (params.encodings.isNotEmpty()) {
+                    params.encodings[0].maxBitrateBps = 1_200_000
+                    params.encodings[0].maxFramerate = fps.toDouble()
+                }
+                tx.sender.parameters = params
+                diagnostics.log("SCREEN_SENDER_TUNED maxBitrate=1200000 fps=$fps", pc)
+            }.onFailure { Timber.tag("WEBRTC").w(it, "tuneScreenVideoSender failed") }
+        }
+    }
+
+    /** Read video transceivers without crashing if the peer/transceivers were disposed. */
+    private fun safeVideoTransceivers(pc: PeerConnection?): List<RtpTransceiver> {
+        if (pc == null) return emptyList()
+        return runCatching {
+            pc.transceivers.filter { it.mediaType == MediaStreamTrack.MediaType.MEDIA_TYPE_VIDEO }
+        }.getOrElse { error ->
+            Timber.tag("CAMERA_WEBRTC").w(error, "safeVideoTransceivers failed")
+            emptyList()
+        }
+    }
+
+    private fun safeTransceiverCount(pc: PeerConnection?): Int = safeVideoTransceivers(pc).size
 
     private fun even(value: Int): Int = value and 0xFFFFFFFE.toInt()
 
@@ -605,6 +637,7 @@ class PeerConnectionManager @Inject constructor(
             setEnabled(true)
         }
         pc.addTrack(localVideoTrack, listOf("AH_STREAM"))
+        tuneScreenVideoSender(pc, fps)
         captureWidth = width
         captureHeight = height
         mediaRunning.set(true)
@@ -817,10 +850,7 @@ class PeerConnectionManager @Inject constructor(
         if (isControlRole) return null
         val pc = peerConnection ?: return null
         val screenId = localVideoTrack?.id()
-        val videoTx = pc.transceivers.filter {
-            it.mediaType == MediaStreamTrack.MediaType.MEDIA_TYPE_VIDEO
-        }
-        // Prefer recv transceiver carrying AH_CAMERA (not our screen send).
+        val videoTx = safeVideoTransceivers(pc)
         val fromCameraRecv = videoTx.firstOrNull { t ->
             val recv = t.receiver.track() as? VideoTrack ?: return@firstOrNull false
             val id = recv.id().orEmpty()
@@ -864,7 +894,7 @@ class PeerConnectionManager @Inject constructor(
     fun cameraDebugSummary(): String {
         val pc = peerConnection
         if (pc == null) return "pc=null"
-        val tx = pc.transceivers.filter { it.mediaType == MediaStreamTrack.MediaType.MEDIA_TYPE_VIDEO }
+        val tx = safeVideoTransceivers(pc)
         val recvCamera = pollInboundCameraTrack()?.id() ?: "none"
         return buildString {
             append("role=${if (isControlRole) "CONTROL" else "REMOTE"} ")
@@ -890,16 +920,14 @@ class PeerConnectionManager @Inject constructor(
     fun isControlCameraSenderAttached(): Boolean {
         val pc = peerConnection ?: return false
         val trackId = localCameraTrack?.id() ?: return false
-        return pc.transceivers.any { it.sender.track()?.id() == trackId }
+        return safeVideoTransceivers(pc).any { it.sender.track()?.id() == trackId }
     }
 
-    /** True when REMOTE already has a video RECV slot (or inbound camera receiver track). */
+    /** True when REMOTE already has a video RECV slot for CONTROL camera. */
     fun hasRemoteCameraReceiveSlot(): Boolean {
         val pc = peerConnection ?: return false
         if (isControlRole) return false
-        val video = pc.transceivers.filter {
-            it.mediaType == MediaStreamTrack.MediaType.MEDIA_TYPE_VIDEO
-        }
+        val video = safeVideoTransceivers(pc)
         if (video.size >= 2) return true
         return video.any {
             it.direction == RtpTransceiverDirection.RECV_ONLY ||
@@ -912,10 +940,11 @@ class PeerConnectionManager @Inject constructor(
 
     fun logTransceiverState(tag: String) {
         val pc = peerConnection ?: return
-        val summary = pc.transceivers.mapIndexed { i, t ->
+        val tx = safeVideoTransceivers(pc)
+        val summary = tx.mapIndexed { i, t ->
             "[$i mid=${t.mid} dir=${t.direction} send=${t.sender.track()?.id()} recv=${t.receiver.track()?.id()}]"
         }.joinToString(" ")
-        Timber.tag("CAMERA_WEBRTC").i("%s videoTx=%d %s", tag, pc.transceivers.size, summary)
+        Timber.tag("CAMERA_WEBRTC").i("%s videoTx=%d %s", tag, tx.size, summary)
         diagnostics.log("$tag $summary", pc)
     }
 
@@ -938,26 +967,27 @@ class PeerConnectionManager @Inject constructor(
     fun ensureRemoteCameraReceiverSlot() {
         val pc = peerConnection ?: return
         if (isControlRole) return
-
-        // Prefer explicit SEND_ONLY for screen so the second m-line is clearly camera recv.
-        pc.transceivers
-            .filter { it.mediaType == MediaStreamTrack.MediaType.MEDIA_TYPE_VIDEO }
-            .forEach { t ->
-                val sendId = t.sender.track()?.id()
-                if (sendId == localVideoTrack?.id() || sendId == "AH_SCREEN") {
-                    runCatching { t.direction = RtpTransceiverDirection.SEND_ONLY }
-                }
-            }
-
-        val videoCount = pc.transceivers.count {
-            it.mediaType == MediaStreamTrack.MediaType.MEDIA_TYPE_VIDEO
+        // Never add transceivers while connected — that disposes live transceivers (camera/screen break).
+        if (pc.connectionState() == PeerConnection.PeerConnectionState.CONNECTED) {
+            Timber.tag("CAMERA_WEBRTC").d("ensureRemoteCameraReceiverSlot skipped — peer CONNECTED")
+            return
         }
-        if (videoCount < 2) {
-            pc.addTransceiver(
-                MediaStreamTrack.MediaType.MEDIA_TYPE_VIDEO,
-                RtpTransceiverInit(RtpTransceiverDirection.RECV_ONLY)
-            )
-            diagnostics.log("REMOTE_CAMERA_RECV_TRANSCEIVER_ADDED count=${pc.transceivers.size}", pc)
+
+        safeVideoTransceivers(pc).forEach { t ->
+            val sendId = t.sender.track()?.id()
+            if (sendId == localVideoTrack?.id() || sendId == "AH_SCREEN") {
+                runCatching { t.direction = RtpTransceiverDirection.SEND_ONLY }
+            }
+        }
+
+        if (safeTransceiverCount(pc) < 2) {
+            runCatching {
+                pc.addTransceiver(
+                    MediaStreamTrack.MediaType.MEDIA_TYPE_VIDEO,
+                    RtpTransceiverInit(RtpTransceiverDirection.RECV_ONLY)
+                )
+            }.onFailure { Timber.tag("CAMERA_WEBRTC").w(it, "add camera RECV transceiver failed") }
+            diagnostics.log("REMOTE_CAMERA_RECV_TRANSCEIVER_ADDED count=${safeTransceiverCount(pc)}", pc)
             Timber.tag("CAMERA_WEBRTC").i("REMOTE camera RECV transceiver prepared")
         }
         logTransceiverState("REMOTE_PRE_OFFER")
@@ -992,50 +1022,51 @@ class PeerConnectionManager @Inject constructor(
     }
 
     private fun attachControlCameraTrackToPeerLocked(pc: PeerConnection, track: VideoTrack): Boolean {
-        // Already on a sender?
-        val already = pc.transceivers.firstOrNull { it.sender.track()?.id() == track.id() }
-        if (already != null) {
-            runCatching { already.direction = RtpTransceiverDirection.SEND_ONLY }
-            diagnostics.log("CONTROL_CAMERA_SENDER_ALREADY_ATTACHED mid=${already.mid}", pc)
-            return true
-        }
+        return runCatching {
+            val videoTx = safeVideoTransceivers(pc)
+            val already = videoTx.firstOrNull { it.sender.track()?.id() == track.id() }
+            if (already != null) {
+                runCatching { already.direction = RtpTransceiverDirection.SEND_ONLY }
+                diagnostics.log("CONTROL_CAMERA_SENDER_ALREADY_ATTACHED mid=${already.mid}", pc)
+                return true
+            }
 
-        // Prefer empty video sender created for Remote's camera recvonly m-line.
-        val videoTx = pc.transceivers.filter {
-            it.mediaType == MediaStreamTrack.MediaType.MEDIA_TYPE_VIDEO
-        }
-        val emptySend = videoTx.firstOrNull { t ->
-            t.sender.track() == null &&
-                (
-                    t.direction == RtpTransceiverDirection.SEND_ONLY ||
-                        t.direction == RtpTransceiverDirection.INACTIVE ||
-                        t.direction == RtpTransceiverDirection.SEND_RECV
-                    )
-        } ?: videoTx.firstOrNull { t ->
-            // Second+ video transceiver with no local send track
-            videoTx.size >= 2 &&
+            val emptySend = videoTx.firstOrNull { t ->
                 t.sender.track() == null &&
-                t !== videoTx.first()
-        }
+                    (
+                        t.direction == RtpTransceiverDirection.SEND_ONLY ||
+                            t.direction == RtpTransceiverDirection.INACTIVE ||
+                            t.direction == RtpTransceiverDirection.SEND_RECV
+                        )
+            } ?: videoTx.firstOrNull { t ->
+                videoTx.size >= 2 &&
+                    t.sender.track() == null &&
+                    t !== videoTx.first()
+            }
 
-        if (emptySend != null) {
-            emptySend.sender.setTrack(track, false)
-            runCatching { emptySend.direction = RtpTransceiverDirection.SEND_ONLY }
-            diagnostics.log("CONTROL_CAMERA_SET_TRACK mid=${emptySend.mid}", pc)
-            Timber.tag("CAMERA_WEBRTC").i(
-                "CONTROL_CAMERA_TRACK_SENT via setTrack mid=%s dir=%s",
-                emptySend.mid,
-                emptySend.direction
-            )
-            return true
-        }
+            if (emptySend != null) {
+                runCatching { emptySend.sender.setTrack(track, false) }
+                    .onFailure { throw it }
+                runCatching { emptySend.direction = RtpTransceiverDirection.SEND_ONLY }
+                diagnostics.log("CONTROL_CAMERA_SET_TRACK mid=${emptySend.mid}", pc)
+                Timber.tag("CAMERA_WEBRTC").i(
+                    "CONTROL_CAMERA_TRACK_SENT via setTrack mid=%s dir=%s",
+                    emptySend.mid,
+                    emptySend.direction
+                )
+                return true
+            }
 
-        // No camera send slot yet — addTrack (requires Remote offer with camera recv, or renegotiation).
-        pc.addTrack(track, listOf("AH_CAMERA_STREAM"))
-        diagnostics.log("CONTROL_CAMERA_ADD_TRACK", pc)
-        Timber.tag("CAMERA_WEBRTC").w("CONTROL_CAMERA_TRACK_SENT via addTrack (no empty send transceiver)")
-        logTransceiverState("CONTROL_AFTER_ADD_TRACK")
-        return true
+            runCatching { pc.addTrack(track, listOf("AH_CAMERA_STREAM")) }
+                .onFailure { throw it }
+            diagnostics.log("CONTROL_CAMERA_ADD_TRACK", pc)
+            Timber.tag("CAMERA_WEBRTC").w("CONTROL_CAMERA_TRACK_SENT via addTrack (fallback)")
+            logTransceiverState("CONTROL_AFTER_ADD_TRACK")
+            true
+        }.getOrElse { error ->
+            Timber.tag("CAMERA_CAPTURE").e(error, "attachControlCameraTrack failed")
+            false
+        }
     }
 
     /**

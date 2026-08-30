@@ -170,35 +170,46 @@ class PeerConnectionManager @Inject constructor(
     @Synchronized
     fun ensureInitialized() {
         if (factory != null) return
-        val egl = ensureEglBase()
-        PeerConnectionFactory.initialize(
-            PeerConnectionFactory.InitializationOptions.builder(context)
-                .setEnableInternalTracer(false)
-                .createInitializationOptions()
-        )
-        val isEmulator = DeviceHints.isProbablyEmulator()
-        val encoder = DefaultVideoEncoderFactory(egl.eglBaseContext, !isEmulator, !isEmulator)
-        val decoder = DefaultVideoDecoderFactory(egl.eglBaseContext)
-        factory = PeerConnectionFactory.builder()
-            .setVideoEncoderFactory(encoder)
-            .setVideoDecoderFactory(decoder)
-            .createPeerConnectionFactory()
-        diagnostics.log("PeerConnectionFactory ready emulator=$isEmulator")
+        runCatching {
+            val egl = ensureEglBase()
+            PeerConnectionFactory.initialize(
+                PeerConnectionFactory.InitializationOptions.builder(context)
+                    .setEnableInternalTracer(false)
+                    .createInitializationOptions()
+            )
+            val isEmulator = DeviceHints.isProbablyEmulator()
+            val encoder = DefaultVideoEncoderFactory(egl.eglBaseContext, !isEmulator, !isEmulator)
+            val decoder = DefaultVideoDecoderFactory(egl.eglBaseContext)
+            factory = PeerConnectionFactory.builder()
+                .setVideoEncoderFactory(encoder)
+                .setVideoDecoderFactory(decoder)
+                .createPeerConnectionFactory()
+            diagnostics.log("PeerConnectionFactory ready emulator=$isEmulator")
+        }.onFailure { error ->
+            Timber.tag("WEBRTC").e(error, "PeerConnectionFactory init failed")
+        }
     }
 
-    fun initRenderer(renderer: SurfaceViewRenderer, mirror: Boolean = false) {
-        ensureInitialized()
-        if (!initializedRenderers.contains(renderer)) {
-            renderer.init(ensureEglBase().eglBaseContext, null)
-            initializedRenderers.add(renderer)
+    fun initRenderer(renderer: SurfaceViewRenderer, mirror: Boolean = false): Boolean {
+        return runCatching {
+            ensureInitialized()
+            if (!initializedRenderers.contains(renderer)) {
+                renderer.init(ensureEglBase().eglBaseContext, null)
+                initializedRenderers.add(renderer)
+            }
+            renderer.setMirror(mirror)
+            renderer.setEnableHardwareScaler(true)
+            true
+        }.getOrElse { error ->
+            Timber.tag("WEBRTC").e(error, "initRenderer failed")
+            false
         }
-        renderer.setMirror(mirror)
-        renderer.setEnableHardwareScaler(true)
     }
 
     fun releaseRenderer(renderer: SurfaceViewRenderer) {
         initializedRenderers.remove(renderer)
         runCatching { renderer.release() }
+            .onFailure { Timber.tag("WEBRTC").w(it, "releaseRenderer failed") }
     }
 
     /**
@@ -366,24 +377,28 @@ class PeerConnectionManager @Inject constructor(
 
             override fun onAddTrack(receiver: RtpReceiver, mediaStreams: Array<out MediaStream>) {
                 if (!alive()) return
-                val track = receiver.track()
-                if (track is VideoTrack) {
-                    routeInboundVideoTrack(track, mediaStreams.mapNotNull { it.id }, pc())
-                }
+                runCatching {
+                    val track = receiver.track()
+                    if (track is VideoTrack) {
+                        routeInboundVideoTrack(track, mediaStreams.mapNotNull { it.id }, pc())
+                    }
+                }.onFailure { Timber.tag("WEBRTC").e(it, "onAddTrack failed") }
             }
 
             override fun onTrack(transceiver: RtpTransceiver) {
                 if (!alive()) return
-                val track = transceiver.receiver.track()
-                if (track is VideoTrack) {
-                    Timber.tag("CAMERA_WEBRTC").i(
-                        "onTrack mid=%s dir=%s track=%s",
-                        transceiver.mid,
-                        transceiver.direction,
-                        track.id()
-                    )
-                    routeInboundVideoTrack(track, emptyList(), pc())
-                }
+                runCatching {
+                    val track = transceiver.receiver.track()
+                    if (track is VideoTrack) {
+                        Timber.tag("CAMERA_WEBRTC").i(
+                            "onTrack mid=%s dir=%s track=%s",
+                            transceiver.mid,
+                            transceiver.direction,
+                            track.id()
+                        )
+                        routeInboundVideoTrack(track, emptyList(), pc())
+                    }
+                }.onFailure { Timber.tag("WEBRTC").e(it, "onTrack failed") }
             }
 
             override fun onConnectionChange(newState: PeerConnection.PeerConnectionState) {
@@ -428,23 +443,27 @@ class PeerConnectionManager @Inject constructor(
         streamIds: List<String>,
         pc: PeerConnection?
     ) {
-        track.setEnabled(true)
-        val id = track.id().orEmpty()
-        if (id.isNotEmpty() && !routedInboundTrackIds.add(id)) {
-            return
+        runCatching {
+            track.setEnabled(true)
+            val id = track.id().orEmpty()
+            if (id.isNotEmpty() && !routedInboundTrackIds.add(id)) {
+                return
+            }
+            val streams = streamIds.joinToString(",")
+            // Role-based routing: Control only receives screen; Remote only receives camera.
+            if (isControlRole) {
+                diagnostics.remoteVideoReceived = true
+                diagnostics.log("REMOTE_SCREEN_TRACK_RECEIVED id=$id streams=$streams", pc)
+                mainHandler.post { listeners?.onRemoteVideoTrack(track) }
+            } else {
+                diagnostics.log("CONTROL_CAMERA_TRACK_RECEIVED id=$id streams=$streams", pc)
+                Timber.tag("CAMERA_WEBRTC").i("REMOTE_CONTROL_CAMERA_TRACK_RECEIVED id=%s streams=%s", id, streams)
+                mainHandler.post { listeners?.onRemoteCameraTrack(track) }
+            }
+            notifyDiagnostics()
+        }.onFailure { error ->
+            Timber.tag("WEBRTC").e(error, "routeInboundVideoTrack failed id=%s", track.id())
         }
-        val streams = streamIds.joinToString(",")
-        // Role-based routing: Control only receives screen; Remote only receives camera.
-        if (isControlRole) {
-            diagnostics.remoteVideoReceived = true
-            diagnostics.log("REMOTE_SCREEN_TRACK_RECEIVED id=$id streams=$streams", pc)
-            mainHandler.post { listeners?.onRemoteVideoTrack(track) }
-        } else {
-            diagnostics.log("CONTROL_CAMERA_TRACK_RECEIVED id=$id streams=$streams", pc)
-            Timber.tag("CAMERA_WEBRTC").i("REMOTE_CONTROL_CAMERA_TRACK_RECEIVED id=%s streams=%s", id, streams)
-            mainHandler.post { listeners?.onRemoteCameraTrack(track) }
-        }
-        notifyDiagnostics()
     }
 
     /**

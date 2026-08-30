@@ -234,7 +234,9 @@ fun SessionScreen(
                     },
                     modifier = Modifier.fillMaxSize(),
                     onRelease = {
-                        cameraRenderer?.release()
+                        runCatching {
+                            cameraRenderer?.release()
+                        }
                         cameraRenderer = null
                     }
                 )
@@ -339,8 +341,10 @@ fun SessionScreen(
                     },
                     modifier = Modifier.fillMaxSize(),
                     onRelease = {
-                        screenRenderer?.setOnTouchListener(null)
-                        screenRenderer?.release()
+                        runCatching {
+                            screenRenderer?.setOnTouchListener(null)
+                            screenRenderer?.release()
+                        }
                         screenRenderer = null
                     }
                 )
@@ -394,7 +398,9 @@ fun SessionScreen(
                     },
                     modifier = Modifier.fillMaxSize(),
                     onRelease = {
-                        localPreviewRenderer?.release()
+                        runCatching {
+                            localPreviewRenderer?.release()
+                        }
                         localPreviewRenderer = null
                     }
                 )

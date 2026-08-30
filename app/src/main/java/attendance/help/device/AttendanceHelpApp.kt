@@ -22,10 +22,9 @@ class AttendanceHelpApp : Application() {
         if (BuildConfig.DEBUG) {
             Timber.plant(Timber.DebugTree())
         }
-        val defaultHandler = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { thread, error ->
-            Timber.e(error, "Uncaught on %s", thread.name)
-            defaultHandler?.uncaughtException(thread, error)
+            Timber.e(error, "Uncaught on %s — process kept alive (no auto-terminate)", thread.name)
+            // Product rule: do not terminate the app on uncaught errors.
         }
         Timber.i("Attendance Help started (version %s)", BuildConfig.VERSION_NAME)
     }

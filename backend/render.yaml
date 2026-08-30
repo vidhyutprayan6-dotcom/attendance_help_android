@@ -1,0 +1,13 @@
+# Render Blueprint — deploy hub from monorepo subfolder (optional).
+# Dashboard setup works the same: Root Directory = backend
+services:
+  - type: web
+    name: attendance-help-hub
+    runtime: node
+    rootDir: backend
+    buildCommand: npm install
+    startCommand: npm start
+    plan: free
+    envVars:
+      - key: NODE_VERSION
+        value: "20"

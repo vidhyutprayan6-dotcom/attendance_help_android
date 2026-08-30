@@ -36,6 +36,7 @@ import androidx.core.content.ContextCompat
 import attendance.help.device.utils.DeviceHints
 import attendance.help.device.utils.ServerAddressParser
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -77,7 +78,21 @@ class SessionController @Inject constructor(
         const val MIN_SESSION_MS = 15_000L
     }
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private val scope = CoroutineScope(
+        SupervisorJob() +
+            Dispatchers.Main.immediate +
+            CoroutineExceptionHandler { _, error ->
+                Timber.e(error, "SessionController coroutine error")
+                runCatching {
+                    update {
+                        copy(
+                            lastError = error.message,
+                            statusMessage = error.message?.let { "Error: $it" } ?: "Unexpected error"
+                        )
+                    }
+                }
+            }
+    )
     private val sessionMutex = Mutex()
     private val gson = Gson()
     private val localDeviceId by lazy { deviceIdentityProvider.getOrCreateDeviceId() }
@@ -163,23 +178,35 @@ class SessionController @Inject constructor(
     }
 
     fun bindRenderer(screenRenderer: SurfaceViewRenderer?) {
+        remoteRenderer?.let { old ->
+            runCatching { inboundScreenTrack?.removeSink(old) }
+        }
         remoteRenderer = screenRenderer
         screenRenderer?.let {
-            peerConnectionManager.initRenderer(it)
-            inboundScreenTrack?.addSink(it)
+            if (peerConnectionManager.initRenderer(it)) {
+                runCatching { inboundScreenTrack?.addSink(it) }
+            }
         }
     }
 
     fun unbindRenderer() {
-        remoteRenderer?.let { r -> inboundScreenTrack?.removeSink(r) }
+        remoteRenderer?.let { r ->
+            runCatching { inboundScreenTrack?.removeSink(r) }
+            peerConnectionManager.releaseRenderer(r)
+        }
         remoteRenderer = null
     }
 
     fun bindCameraRenderer(renderer: SurfaceViewRenderer?) {
-        cameraRenderer?.let { old -> inboundCameraTrack?.removeSink(old) }
+        cameraRenderer?.let { old ->
+            runCatching { inboundCameraTrack?.removeSink(old) }
+        }
         cameraRenderer = renderer
         renderer?.let { r ->
-            peerConnectionManager.initRenderer(r, mirror = false)
+            if (!peerConnectionManager.initRenderer(r, mirror = false)) {
+                logCameraDebug("REMOTE renderer init failed")
+                return
+            }
             inboundCameraTrack?.let { track ->
                 track.setEnabled(true)
                 r.post {
@@ -192,21 +219,30 @@ class SessionController @Inject constructor(
     }
 
     fun unbindCameraRenderer() {
-        cameraRenderer?.let { r -> inboundCameraTrack?.removeSink(r) }
+        cameraRenderer?.let { r ->
+            runCatching { inboundCameraTrack?.removeSink(r) }
+            peerConnectionManager.releaseRenderer(r)
+        }
         cameraRenderer = null
     }
 
     fun bindLocalCameraPreview(renderer: SurfaceViewRenderer?) {
-        localCameraPreview?.let { old -> peerConnectionManager.detachLocalCameraPreview(old) }
+        localCameraPreview?.let { old ->
+            peerConnectionManager.detachLocalCameraPreview(old)
+        }
         localCameraPreview = renderer
         renderer?.let {
-            peerConnectionManager.initRenderer(it, mirror = true)
-            peerConnectionManager.attachLocalCameraPreview(it)
+            if (peerConnectionManager.initRenderer(it, mirror = true)) {
+                peerConnectionManager.attachLocalCameraPreview(it)
+            }
         }
     }
 
     fun unbindLocalCameraPreview() {
-        localCameraPreview?.let { peerConnectionManager.detachLocalCameraPreview(it) }
+        localCameraPreview?.let { preview ->
+            peerConnectionManager.detachLocalCameraPreview(preview)
+            peerConnectionManager.releaseRenderer(preview)
+        }
         localCameraPreview = null
     }
 
@@ -602,10 +638,10 @@ class SessionController @Inject constructor(
                 copy(
                     serverHost = endpoint.host,
                     serverPort = endpoint.port,
-                    statusMessage = "Connecting to ${endpoint.host}:${endpoint.port}…"
+                    statusMessage = "Connecting to ${ServerAddressParser.toSignalingWsUrl(endpoint)}…"
                 )
             }
-            openHubClient(ServerAddressParser.toWsUrl(endpoint))
+            openHubClient(ServerAddressParser.toSignalingWsUrl(endpoint))
         } catch (t: Throwable) {
             Timber.e(t, "connectToServer crashed")
             failServer(t.message ?: "Connection failed")
@@ -1109,7 +1145,8 @@ class SessionController @Inject constructor(
 
     private fun handleHub(message: HubMessage) {
         scope.launch {
-            when (message) {
+            try {
+                when (message) {
                 is HubMessage.RegisterAck -> {
                     update { copy(statusMessage = message.message.ifBlank { "Registered" }) }
                     val turn = message.turnConfig ?: TurnServerConfig()
@@ -1432,6 +1469,16 @@ class SessionController @Inject constructor(
                 }
                 else -> Unit
             }
+            } catch (error: Throwable) {
+                Timber.e(error, "handleHub failed type=%s", message.type)
+                update {
+                    copy(
+                        lastError = error.message,
+                        statusMessage = error.message?.let { "Session error: $it" }
+                            ?: "Session error — try disconnect and reconnect"
+                    )
+                }
+            }
         }
     }
 
@@ -1604,17 +1651,21 @@ class SessionController @Inject constructor(
         onDataMessage = { handleData(it) },
         onRemoteVideoTrack = { track ->
             scope.launch {
-                if (_ui.value.mode != DeviceMode.CONTROL) return@launch
-                remoteRenderer?.let { r -> inboundScreenTrack?.removeSink(r) }
-                inboundScreenTrack = track
-                remoteRenderer?.let { track.addSink(it) }
-                evaluateTransportState(peerConnectionManager.diagnosticsSnapshot())
+                runCatching {
+                    if (_ui.value.mode != DeviceMode.CONTROL) return@runCatching
+                    remoteRenderer?.let { r -> runCatching { inboundScreenTrack?.removeSink(r) } }
+                    inboundScreenTrack = track
+                    remoteRenderer?.let { track.addSink(it) }
+                    evaluateTransportState(peerConnectionManager.diagnosticsSnapshot())
+                }.onFailure { Timber.e(it, "onRemoteVideoTrack handler failed") }
             }
         },
         onRemoteCameraTrack = { track ->
             scope.launch {
-                if (_ui.value.mode != DeviceMode.REMOTE) return@launch
-                attachInboundCameraTrackLocked(track)
+                runCatching {
+                    if (_ui.value.mode != DeviceMode.REMOTE) return@runCatching
+                    attachInboundCameraTrackLocked(track)
+                }.onFailure { Timber.e(it, "onRemoteCameraTrack handler failed") }
             }
         },
         onDiagnosticsChanged = { diag ->

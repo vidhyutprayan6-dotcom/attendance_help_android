@@ -340,7 +340,7 @@ const server = http.createServer((_req, res) => {
   res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
   res.end(
     "Attendance Help Hub (Bongsagi) is running.\n" +
-      "Phones must connect with WebSocket to ws://<THIS_PC_IP>:8765\n"
+      "Phones: LAN ws://<IP>:8765  ·  Cloud wss://<your-app.onrender.com>\n"
   );
 });
 

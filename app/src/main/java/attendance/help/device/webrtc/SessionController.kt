@@ -831,6 +831,7 @@ class SessionController @Inject constructor(
     }
 
     private fun evaluateTransportState(diag: WebRtcTransportDiagnostics) {
+        if (boundPeerId == null && _ui.value.boundPeer == null) return
         val peerPresent = peerConnectionManager.hasPeerConnection()
         val captureActive = diag.captureActive || _ui.value.screenShareActive
         val connected = peerPresent && diag.transportConnected
@@ -1008,17 +1009,21 @@ class SessionController @Inject constructor(
     }
 
     private suspend fun applySessionReleasedLocked(message: String) {
+        // Clear binding before tearing down WebRTC so disconnect callbacks cannot start reconnect.
+        sessionEpoch++
+        boundPeerId = null
+        activeSessionId = ""
+        sessionBoundAtMs = 0L
+        resetNegotiationState()
+        clearPendingIce()
+        offerInFlight = false
+        webrtcRetryCount = 0
+        handlingWebRtcFailure = false
         stopScreenLocally()
         peerConnectionManager.release()
         peerCreated = false
         inboundScreenTrack = null
-        boundPeerId = null
         remoteScreenReady = false
-        clearPendingIce()
-        resetNegotiationState()
-        sessionEpoch++
-        activeSessionId = ""
-        sessionBoundAtMs = 0L
         stopCamerasLocallyLocked()
         cameraSessionManager.reset()
         sessionRepository.setSessionLinkState(
@@ -1047,6 +1052,7 @@ class SessionController @Inject constructor(
                 sessionId = "",
                 captureGeometry = CaptureGeometry(),
                 statusMessage = message,
+                transportConnected = false,
                 webrtcState = "CLOSED"
             )
         }
@@ -1663,10 +1669,12 @@ class SessionController @Inject constructor(
                 evaluateTransportState(peerConnectionManager.diagnosticsSnapshot())
                 when (state) {
                     PeerConnection.PeerConnectionState.FAILED -> {
-                        handleWebRtcFailure("WebRTC connection failed")
+                        if (boundPeerId != null) {
+                            handleWebRtcFailure("WebRTC connection failed")
+                        }
                     }
                     PeerConnection.PeerConnectionState.DISCONNECTED -> {
-                        if (_ui.value.transportConnected) {
+                        if (boundPeerId != null && _ui.value.transportConnected) {
                             handleWebRtcFailure("WebRTC disconnected")
                         }
                     }
@@ -1676,7 +1684,7 @@ class SessionController @Inject constructor(
         },
         onIceConnectionChange = { iceState ->
             Timber.i("WebRTC ICE state -> %s", iceState)
-            if (iceState == PeerConnection.IceConnectionState.FAILED) {
+            if (iceState == PeerConnection.IceConnectionState.FAILED && boundPeerId != null) {
                 scope.launch { handleWebRtcFailure("ICE connection failed") }
             }
         },
@@ -1770,7 +1778,9 @@ class SessionController @Inject constructor(
     }
 
     private suspend fun handleWebRtcFailure(reason: String) {
+        if (boundPeerId == null || _ui.value.boundPeer == null) return
         if (handlingWebRtcFailure) return
+        val epochAtStart = sessionEpoch
         handlingWebRtcFailure = true
         try {
             peerConnectionManager.diagnostics.logIceFailureReport(null)
@@ -1789,19 +1799,19 @@ class SessionController @Inject constructor(
                 return
             }
             webrtcRetryCount++
-            val peerId = boundPeerId
+            val peerId = boundPeerId ?: return
+            if (epochAtStart != sessionEpoch) return
             update { copy(statusMessage = "$reason — clean reconnect ($webrtcRetryCount/2)…") }
-            peerId?.let { id ->
-                hubClient?.send(
-                    HubMessage.WebRtcReconnect(
-                        fromId = localDeviceId,
-                        toId = id,
-                        sessionId = activeSessionId,
-                        peerGeneration = peerConnectionManager.currentPeerGeneration()
-                    )
+            hubClient?.send(
+                HubMessage.WebRtcReconnect(
+                    fromId = localDeviceId,
+                    toId = peerId,
+                    sessionId = activeSessionId,
+                    peerGeneration = peerConnectionManager.currentPeerGeneration()
                 )
-            }
+            )
             sessionMutex.withLock {
+                if (epochAtStart != sessionEpoch || boundPeerId == null) return@withLock
                 clearPendingIce()
                 resetNegotiationState()
                 inboundScreenTrack = null
@@ -1817,6 +1827,7 @@ class SessionController @Inject constructor(
                         peerCreated = false
                         update { copy(transportConnected = false, sessionLinkState = SessionLinkState.BOUND) }
                         delay(800)
+                        if (epochAtStart != sessionEpoch || boundPeerId == null) return@withLock
                         if (!ensurePeer(isControlDevice = false, force = true)) {
                             update { copy(statusMessage = "WebRTC reconnect failed — peer could not be recreated") }
                             return@withLock
@@ -1828,6 +1839,7 @@ class SessionController @Inject constructor(
                         beginRemoteOfferLocked()
                     }
                     DeviceMode.CONTROL -> {
+                        if (epochAtStart != sessionEpoch || boundPeerId == null) return@withLock
                         peerConnectionManager.teardownPeerForReconnect()
                         peerCreated = false
                         update {

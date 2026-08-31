@@ -126,10 +126,14 @@ fun SessionScreen(
     }
 
     var wasBound by remember { mutableStateOf(false) }
-    LaunchedEffect(state.boundPeer) {
-        if (state.boundPeer != null) {
+    LaunchedEffect(state.boundPeer, state.sessionLinkState) {
+        val stillInSession = state.boundPeer != null &&
+            (state.sessionLinkState == SessionLinkState.BOUND ||
+                state.sessionLinkState == SessionLinkState.STREAMING)
+        if (stillInSession) {
             wasBound = true
         } else if (wasBound) {
+            wasBound = false
             onBack()
         }
     }

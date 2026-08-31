@@ -3,10 +3,14 @@ package attendance.help.device.presentation.navigation
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
+import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import attendance.help.device.presentation.connect.ConnectScreen
 import attendance.help.device.presentation.connect.ConnectViewModel
@@ -19,10 +23,39 @@ import attendance.help.device.presentation.remotelist.RemoteListViewModel
 import attendance.help.device.presentation.session.SessionScreen
 import attendance.help.device.presentation.session.SessionViewModel
 import attendance.help.device.presentation.welcome.WelcomeScreen
+import attendance.help.device.webrtc.SessionController
 
 @Composable
-fun AppNavHost(startDestination: String) {
+fun AppNavHost(
+    startDestination: String,
+    sessionController: SessionController
+) {
     val navController = rememberNavController()
+    val sessionSnapshot by sessionController.uiState.collectAsStateWithLifecycle()
+    val currentRoute = navController.currentBackStackEntryAsState().value?.destination?.route
+    var sessionHadBoundPeer by remember { mutableStateOf(false) }
+
+    LaunchedEffect(sessionSnapshot.boundPeer) {
+        if (sessionSnapshot.boundPeer != null) {
+            sessionHadBoundPeer = true
+        }
+    }
+
+    LaunchedEffect(sessionSnapshot.boundPeer, currentRoute) {
+        if (currentRoute == Routes.Session &&
+            sessionHadBoundPeer &&
+            sessionSnapshot.boundPeer == null
+        ) {
+            sessionHadBoundPeer = false
+            navController.popBackStack()
+        }
+    }
+
+    LaunchedEffect(currentRoute) {
+        if (currentRoute != Routes.Session && sessionSnapshot.boundPeer == null) {
+            sessionHadBoundPeer = false
+        }
+    }
 
     NavHost(navController = navController, startDestination = startDestination) {
         composable(Routes.Welcome) {

@@ -85,7 +85,10 @@ class MainActivity : AppCompatActivity() {
         setContent {
             AttendanceHelpTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
-                    AppNavHost(startDestination = startRoute)
+                    AppNavHost(
+                        startDestination = startRoute,
+                        sessionController = sessionController
+                    )
                 }
             }
         }

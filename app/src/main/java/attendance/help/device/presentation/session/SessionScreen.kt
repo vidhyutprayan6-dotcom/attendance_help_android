@@ -5,6 +5,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.provider.Settings
 import android.view.MotionEvent
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -13,6 +14,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -74,10 +76,12 @@ fun SessionScreen(
     var screenRenderer by remember { mutableStateOf<SurfaceViewRenderer?>(null) }
     var cameraRenderer by remember { mutableStateOf<SurfaceViewRenderer?>(null) }
     var localPreviewRenderer by remember { mutableStateOf<SurfaceViewRenderer?>(null) }
+    var immersiveRemoteControl by remember { mutableStateOf(false) }
     val sessionActive = state.boundPeer != null &&
         (state.sessionLinkState == SessionLinkState.BOUND ||
             state.sessionLinkState == SessionLinkState.STREAMING)
     val camerasOn = state.dualCamera.isActive
+    val controlSessionActive = mode == DeviceMode.CONTROL && sessionActive
 
     val cameraPermission = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -113,6 +117,14 @@ fun SessionScreen(
         }
     }
 
+    LaunchedEffect(sessionActive) {
+        if (!sessionActive) immersiveRemoteControl = false
+    }
+
+    BackHandler(enabled = immersiveRemoteControl) {
+        immersiveRemoteControl = false
+    }
+
     var wasBound by remember { mutableStateOf(false) }
     LaunchedEffect(state.boundPeer) {
         if (state.boundPeer != null) {
@@ -122,41 +134,47 @@ fun SessionScreen(
         }
     }
 
+    val scrollState = rememberScrollState()
+
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(16.dp)
-    ) {
-        Text(
-            text = stringResource(R.string.control_title),
-            style = MaterialTheme.typography.headlineSmall,
-            color = MaterialTheme.colorScheme.primary
-        )
-        Text(
-            text = when (mode) {
-                DeviceMode.CONTROL -> stringResource(R.string.control_hint_control)
-                DeviceMode.REMOTE -> stringResource(R.string.control_hint_remote)
-                else -> ""
-            }
-        )
-        state.boundPeer?.let {
-            Text(
-                text = "${stringResource(R.string.bound_with)}: ${it.displayName}",
-                style = MaterialTheme.typography.titleMedium
+            .then(
+                if (immersiveRemoteControl) Modifier else Modifier.verticalScroll(scrollState)
             )
-        }
-        if (state.statusMessage.isNotBlank()) {
-            Text(state.statusMessage, style = MaterialTheme.typography.bodyMedium)
-        }
-        if (state.transportConnected) {
+            .padding(if (immersiveRemoteControl) 0.dp else 16.dp)
+    ) {
+        if (!immersiveRemoteControl) {
             Text(
-                text = stringResource(R.string.transport_connected),
-                style = MaterialTheme.typography.bodySmall,
+                text = stringResource(R.string.control_title),
+                style = MaterialTheme.typography.headlineSmall,
                 color = MaterialTheme.colorScheme.primary
             )
+            Text(
+                text = when (mode) {
+                    DeviceMode.CONTROL -> stringResource(R.string.control_hint_control)
+                    DeviceMode.REMOTE -> stringResource(R.string.control_hint_remote)
+                    else -> ""
+                }
+            )
+            state.boundPeer?.let {
+                Text(
+                    text = "${stringResource(R.string.bound_with)}: ${it.displayName}",
+                    style = MaterialTheme.typography.titleMedium
+                )
+            }
+            if (state.statusMessage.isNotBlank()) {
+                Text(state.statusMessage, style = MaterialTheme.typography.bodyMedium)
+            }
+            if (state.transportConnected) {
+                Text(
+                    text = stringResource(R.string.transport_connected),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.primary
+                )
+            }
+            Spacer(modifier = Modifier.height(8.dp))
         }
-        Spacer(modifier = Modifier.height(8.dp))
 
         if (mode == DeviceMode.REMOTE) {
             if (!state.accessibilityEnabled) {
@@ -241,78 +259,55 @@ fun SessionScreen(
             }
         }
 
-        if (mode == DeviceMode.CONTROL && sessionActive) {
+        if (controlSessionActive) {
             val videoW = state.captureGeometry.captureWidth.takeIf { it > 0 } ?: 1280
             val videoH = state.captureGeometry.captureHeight.takeIf { it > 0 } ?: 720
             val touchPath = remember { mutableStateListOf<Pair<Float, Float>>() }
             var downTime by remember { mutableLongStateOf(0L) }
+            val streamReady = state.screenShareActive ||
+                state.sessionLinkState == SessionLinkState.STREAMING
 
-            Text(
-                text = stringResource(R.string.remote_screen_label),
-                style = MaterialTheme.typography.titleMedium
-            )
+            if (!immersiveRemoteControl) {
+                Text(
+                    text = stringResource(R.string.remote_screen_label),
+                    style = MaterialTheme.typography.titleMedium
+                )
+            }
+
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(400.dp)
+                    .then(
+                        if (immersiveRemoteControl) {
+                            Modifier
+                                .weight(1f)
+                                .fillMaxHeight()
+                        } else {
+                            Modifier.height(400.dp)
+                        }
+                    )
                     .background(Color.Black)
             ) {
                 AndroidView(
                     factory = { ctx ->
                         SurfaceViewRenderer(ctx).also { renderer ->
                             screenRenderer = renderer
-                            renderer.setOnTouchListener { view, event ->
-                                val rendered = VideoCoordinateMapper.computeRenderedVideoRect(
-                                    view.width,
-                                    view.height,
-                                    videoW,
-                                    videoH
-                                )
-                                when (event.actionMasked) {
-                                    MotionEvent.ACTION_DOWN -> {
-                                        touchPath.clear()
-                                        downTime = System.currentTimeMillis()
-                                        VideoCoordinateMapper.touchToNormalized(
-                                            event.x,
-                                            event.y,
-                                            rendered
-                                        )?.let { (nx, ny) ->
-                                            touchPath.add(nx to ny)
-                                        }
-                                    }
-                                    MotionEvent.ACTION_MOVE -> {
-                                        VideoCoordinateMapper.touchToNormalized(
-                                            event.x,
-                                            event.y,
-                                            rendered
-                                        )?.let { (nx, ny) ->
-                                            if (touchPath.isEmpty() || touchPath.last() != nx to ny) {
-                                                touchPath.add(nx to ny)
-                                            }
-                                        }
-                                    }
-                                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                                        val norm = VideoCoordinateMapper.touchToNormalized(
-                                            event.x,
-                                            event.y,
-                                            rendered
-                                        )
-                                        if (norm != null) {
-                                            val duration = (System.currentTimeMillis() - downTime)
-                                                .coerceAtLeast(50L)
-                                            if (touchPath.size <= 1) {
-                                                onTap(norm.first, norm.second)
-                                            } else {
-                                                norm.let { touchPath.add(it) }
-                                                onSwipe(touchPath.toList(), duration)
-                                            }
-                                        }
-                                        touchPath.clear()
-                                    }
-                                }
-                                true
-                            }
                         }
+                    },
+                    update = { renderer ->
+                        attachRemoteScreenTouchListener(
+                            view = renderer,
+                            videoW = videoW,
+                            videoH = videoH,
+                            touchPath = touchPath,
+                            getDownTime = { downTime },
+                            setDownTime = { downTime = it },
+                            immersive = immersiveRemoteControl,
+                            streamReady = streamReady,
+                            onTap = onTap,
+                            onSwipe = onSwipe,
+                            onEnterImmersive = { immersiveRemoteControl = true }
+                        )
                     },
                     modifier = Modifier.fillMaxSize(),
                     onRelease = {
@@ -323,26 +318,50 @@ fun SessionScreen(
                         screenRenderer = null
                     }
                 )
-                if (!state.screenShareActive && state.sessionLinkState != SessionLinkState.STREAMING) {
-                    Text(
-                        text = stringResource(R.string.waiting_remote_screen),
-                        color = Color.White,
-                        modifier = Modifier.align(Alignment.Center)
-                    )
-                } else {
-                    Text(
-                        text = stringResource(R.string.session_main_feed),
-                        color = Color.White,
-                        modifier = Modifier
-                            .align(Alignment.TopStart)
-                            .padding(8.dp)
-                    )
+                when {
+                    !streamReady -> {
+                        Text(
+                            text = stringResource(R.string.waiting_remote_screen),
+                            color = Color.White,
+                            modifier = Modifier.align(Alignment.Center)
+                        )
+                    }
+                    immersiveRemoteControl -> {
+                        Text(
+                            text = stringResource(R.string.remote_screen_immersive_hint),
+                            color = Color.White,
+                            modifier = Modifier
+                                .align(Alignment.TopStart)
+                                .padding(12.dp)
+                        )
+                        OutlinedButton(
+                            onClick = { immersiveRemoteControl = false },
+                            modifier = Modifier
+                                .align(Alignment.TopEnd)
+                                .padding(12.dp)
+                        ) {
+                            Text(stringResource(R.string.exit_fullscreen))
+                        }
+                    }
+                    else -> {
+                        Text(
+                            text = stringResource(R.string.session_main_feed),
+                            color = Color.White,
+                            modifier = Modifier
+                                .align(Alignment.TopStart)
+                                .padding(8.dp)
+                        )
+                    }
                 }
             }
 
-            Spacer(modifier = Modifier.height(8.dp))
             Row(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .then(
+                        if (immersiveRemoteControl) Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                        else Modifier
+                    ),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 OutlinedButton(
@@ -359,64 +378,138 @@ fun SessionScreen(
                 ) { Text(stringResource(R.string.key_recents)) }
             }
 
-            Spacer(modifier = Modifier.height(12.dp))
-            Text(stringResource(R.string.session_control_camera), style = MaterialTheme.typography.titleMedium)
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(180.dp)
-                    .background(Color.DarkGray)
-            ) {
-                AndroidView(
-                    factory = { ctx ->
-                        SurfaceViewRenderer(ctx).also { localPreviewRenderer = it }
-                    },
-                    modifier = Modifier.fillMaxSize(),
-                    onRelease = {
-                        runCatching {
-                            localPreviewRenderer?.release()
+            if (!immersiveRemoteControl) {
+                Spacer(modifier = Modifier.height(12.dp))
+                Text(stringResource(R.string.session_control_camera), style = MaterialTheme.typography.titleMedium)
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(180.dp)
+                        .background(Color.DarkGray)
+                ) {
+                    AndroidView(
+                        factory = { ctx ->
+                            SurfaceViewRenderer(ctx).also { localPreviewRenderer = it }
+                        },
+                        modifier = Modifier.fillMaxSize(),
+                        onRelease = {
+                            runCatching {
+                                localPreviewRenderer?.release()
+                            }
+                            localPreviewRenderer = null
                         }
-                        localPreviewRenderer = null
-                    }
-                )
-                if (!camerasOn) {
-                    Text(
-                        text = stringResource(R.string.camera_preview_placeholder),
-                        color = Color.White,
-                        modifier = Modifier.align(Alignment.Center)
                     )
+                    if (!camerasOn) {
+                        Text(
+                            text = stringResource(R.string.camera_preview_placeholder),
+                            color = Color.White,
+                            modifier = Modifier.align(Alignment.Center)
+                        )
+                    }
                 }
-            }
-            if (!camerasOn) {
-                Button(
-                    onClick = { requestStartCamera() },
-                    modifier = Modifier.fillMaxWidth(),
-                    enabled = state.transportConnected
-                ) { Text(stringResource(R.string.start_cameras)) }
-            } else {
-                OutlinedButton(
-                    onClick = onStopCamera,
-                    modifier = Modifier.fillMaxWidth()
-                ) { Text(stringResource(R.string.stop_cameras)) }
+                if (!camerasOn) {
+                    Button(
+                        onClick = { requestStartCamera() },
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = state.transportConnected
+                    ) { Text(stringResource(R.string.start_cameras)) }
+                } else {
+                    OutlinedButton(
+                        onClick = onStopCamera,
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text(stringResource(R.string.stop_cameras)) }
+                }
             }
         }
 
-        Spacer(modifier = Modifier.height(12.dp))
-        Button(
-            onClick = onReleaseRemote,
-            modifier = Modifier.fillMaxWidth(),
-            enabled = state.boundPeer != null
-        ) {
-            Text(
-                if (mode == DeviceMode.CONTROL) {
-                    stringResource(R.string.release_remote)
-                } else {
-                    stringResource(R.string.release_from_control)
+        if (!immersiveRemoteControl) {
+            Spacer(modifier = Modifier.height(12.dp))
+            Button(
+                onClick = onReleaseRemote,
+                modifier = Modifier.fillMaxWidth(),
+                enabled = state.boundPeer != null
+            ) {
+                Text(
+                    if (mode == DeviceMode.CONTROL) {
+                        stringResource(R.string.release_remote)
+                    } else {
+                        stringResource(R.string.release_from_control)
+                    }
+                )
+            }
+            OutlinedButton(onClick = onBack, modifier = Modifier.fillMaxWidth()) {
+                Text(stringResource(R.string.back_action))
+            }
+        }
+    }
+}
+
+private fun attachRemoteScreenTouchListener(
+    view: SurfaceViewRenderer,
+    videoW: Int,
+    videoH: Int,
+    touchPath: MutableList<Pair<Float, Float>>,
+    getDownTime: () -> Long,
+    setDownTime: (Long) -> Unit,
+    immersive: Boolean,
+    streamReady: Boolean,
+    onTap: (x: Float, y: Float) -> Unit,
+    onSwipe: (points: List<Pair<Float, Float>>, durationMs: Long) -> Unit,
+    onEnterImmersive: () -> Unit
+) {
+    view.setOnTouchListener { v, event ->
+        val rendered = VideoCoordinateMapper.computeRenderedVideoRect(
+            v.width,
+            v.height,
+            videoW,
+            videoH
+        )
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                touchPath.clear()
+                setDownTime(System.currentTimeMillis())
+                VideoCoordinateMapper.touchToNormalized(
+                    event.x,
+                    event.y,
+                    rendered
+                )?.let { (nx, ny) ->
+                    touchPath.add(nx to ny)
                 }
-            )
+            }
+            MotionEvent.ACTION_MOVE -> {
+                VideoCoordinateMapper.touchToNormalized(
+                    event.x,
+                    event.y,
+                    rendered
+                )?.let { (nx, ny) ->
+                    if (touchPath.isEmpty() || touchPath.last() != nx to ny) {
+                        touchPath.add(nx to ny)
+                    }
+                }
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                val norm = VideoCoordinateMapper.touchToNormalized(
+                    event.x,
+                    event.y,
+                    rendered
+                )
+                if (norm != null) {
+                    val duration = (System.currentTimeMillis() - getDownTime())
+                        .coerceAtLeast(50L)
+                    if (!immersive && streamReady && touchPath.size <= 1) {
+                        onEnterImmersive()
+                    } else if (immersive) {
+                        if (touchPath.size <= 1) {
+                            onTap(norm.first, norm.second)
+                        } else {
+                            touchPath.add(norm)
+                            onSwipe(touchPath.toList(), duration)
+                        }
+                    }
+                }
+                touchPath.clear()
+            }
         }
-        OutlinedButton(onClick = onBack, modifier = Modifier.fillMaxWidth()) {
-            Text(stringResource(R.string.back_action))
-        }
+        true
     }
 }

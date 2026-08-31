@@ -11,10 +11,10 @@
     <string name="back_action">Back</string>
 
     <string name="connect_title">1. Connect to server</string>
-    <string name="connect_hint">Enter the hub server: LAN IP (same Wi‑Fi) or cloud URL (e.g. your-app.onrender.com).</string>
-    <string name="connect_ip_example">LAN: 172.20.1.51:8765  ·  Cloud: your-app.onrender.com</string>
+    <string name="connect_hint">Enter your cloud hub URL (Render or similar).</string>
+    <string name="connect_ip_example">Example: your-service.onrender.com</string>
     <string name="server_ip_label">Server address</string>
-    <string name="server_ip_placeholder">172.20.1.51 or your-app.onrender.com</string>
+    <string name="server_ip_placeholder">your-service.onrender.com</string>
     <string name="phone_name_label">This phone name</string>
     <string name="connect_action">Connect to server</string>
     <string name="disconnect_server">Disconnect from server</string>
@@ -48,7 +48,9 @@
     <string name="control_hint_remote">Control is connected. Allow screen share and enable Accessibility so this phone can be fully controlled.</string>
     <string name="release_remote">Disconnect from this remote</string>
     <string name="release_from_control">Disconnect from Control</string>
-    <string name="session_main_feed">Remote screen — touch to control</string>
+    <string name="session_main_feed">Tap to open full-screen control</string>
+    <string name="remote_screen_immersive_hint">Drag to scroll · tap to control the remote phone</string>
+    <string name="exit_fullscreen">Exit full screen</string>
     <string name="camera_feed_label">Camera feed</string>
     <string name="camera_feed_control_video">Control phone camera</string>
     <string name="remote_screen_label">Remote phone (full control)</string>

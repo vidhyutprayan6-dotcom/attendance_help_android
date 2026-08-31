@@ -10,10 +10,10 @@
     <string name="back_action">رجوع</string>
 
     <string name="connect_title">1. الاتصال بالخادم</string>
-    <string name="connect_hint">أدخل عنوان الخادم: IP محلي أو رابط Render مثل your-app.onrender.com</string>
-    <string name="connect_ip_example">محلي: 172.20.1.51:8765  ·  سحابة: your-app.onrender.com</string>
+    <string name="connect_hint">أدخل رابط الخادم السحابي (Render أو ما شابه).</string>
+    <string name="connect_ip_example">مثال: your-service.onrender.com</string>
     <string name="server_ip_label">عنوان الخادم</string>
-    <string name="server_ip_placeholder">172.20.1.51 أو your-app.onrender.com</string>
+    <string name="server_ip_placeholder">your-service.onrender.com</string>
     <string name="phone_name_label">اسم هذا الهاتف</string>
     <string name="connect_action">الاتصال بالخادم</string>
     <string name="disconnect_server">قطع الاتصال بالخادم</string>
@@ -47,7 +47,9 @@
     <string name="control_hint_remote">جهاز التحكم متصل. اسمح بمشاركة الشاشة وفعّل إمكانية الوصول للتحكم الكامل.</string>
     <string name="release_remote">قطع الاتصال بهذا الهاتف البعيد</string>
     <string name="release_from_control">قطع الاتصال بهاتف التحكم</string>
-    <string name="session_main_feed">شاشة البعيد — المس للتحكم</string>
+    <string name="session_main_feed">اضغط لفتح التحكم بملء الشاشة</string>
+    <string name="remote_screen_immersive_hint">اسحب للتمرير · المس للتحكم في الهاتف البعيد</string>
+    <string name="exit_fullscreen">الخروج من ملء الشاشة</string>
     <string name="camera_feed_label">بث الكاميرا</string>
     <string name="camera_feed_control_video">كاميرا هاتف التحكم</string>
     <string name="remote_screen_label">الهاتف البعيد (تحكم كامل)</string>

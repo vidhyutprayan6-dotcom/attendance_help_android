@@ -5,6 +5,7 @@ import androidx.lifecycle.viewModelScope
 import attendance.help.device.domain.model.AppLinkSnapshot
 import attendance.help.device.domain.model.ServerLinkState
 import attendance.help.device.domain.repository.SessionRepository
+import attendance.help.device.utils.ServerAddressParser
 import attendance.help.device.webrtc.SessionController
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -17,7 +18,7 @@ import kotlinx.coroutines.launch
 import javax.inject.Inject
 
 data class ConnectForm(
-    val host: String = "",
+    val host: String = ServerAddressParser.DEFAULT_CLOUD_HUB,
     val name: String = "Phone"
 )
 
@@ -34,7 +35,7 @@ class ConnectViewModel @Inject constructor(
             val savedHost = sessionRepository.serverHost.first()
             val savedName = sessionRepository.displayName.first()
             form.value = ConnectForm(
-                host = savedHost,
+                host = savedHost.ifBlank { ServerAddressParser.DEFAULT_CLOUD_HUB },
                 name = savedName.ifBlank { "Phone" }
             )
         }

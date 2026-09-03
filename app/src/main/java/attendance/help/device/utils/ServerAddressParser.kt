@@ -15,6 +15,9 @@ package attendance.help.device.utils
  */
 object ServerAddressParser {
 
+    /** Production cloud hub (Render). Accept host or full https:// URL in the connect field. */
+    const val DEFAULT_CLOUD_HUB = "attendance-help-android.onrender.com"
+
     data class Endpoint(
         val host: String,
         val port: Int,
@@ -79,10 +82,16 @@ object ServerAddressParser {
         }
     }
 
-    /** WebSocket URL for hub signaling (OkHttp). */
+    /** WebSocket URL for hub signaling (OkHttp). Omits default ports 443/80 for cloud CDNs. */
     fun toSignalingWsUrl(endpoint: Endpoint): String {
         val scheme = if (endpoint.secure) "wss" else "ws"
-        return "$scheme://${endpoint.host}:${endpoint.port}"
+        val omitPort = (endpoint.secure && endpoint.port == 443) ||
+            (!endpoint.secure && endpoint.port == 80)
+        return if (omitPort) {
+            "$scheme://${endpoint.host}"
+        } else {
+            "$scheme://${endpoint.host}:${endpoint.port}"
+        }
     }
 
     /** @deprecated use [toSignalingWsUrl] */

@@ -31,7 +31,7 @@ class ServerAddressParserTest {
         assertEquals("my-app.onrender.com", ep.host)
         assertEquals(443, ep.port)
         assertTrue(ep.secure)
-        assertEquals("wss://my-app.onrender.com:443", ServerAddressParser.toSignalingWsUrl(ep))
+        assertEquals("wss://my-app.onrender.com", ServerAddressParser.toSignalingWsUrl(ep))
     }
 
     @Test
@@ -39,14 +39,54 @@ class ServerAddressParserTest {
         val ep = ServerAddressParser.parse("https://my-app.onrender.com", defaultPort).getOrThrow()
         assertTrue(ep.secure)
         assertEquals(443, ep.port)
-        assertEquals("wss://my-app.onrender.com:443", ServerAddressParser.toSignalingWsUrl(ep))
+        assertEquals("wss://my-app.onrender.com", ServerAddressParser.toSignalingWsUrl(ep))
     }
 
     @Test
     fun wssPrefix_usesWss443() {
         val ep = ServerAddressParser.parse("wss://my-app.onrender.com", defaultPort).getOrThrow()
         assertTrue(ep.secure)
-        assertEquals("wss://my-app.onrender.com:443", ServerAddressParser.toSignalingWsUrl(ep))
+        assertEquals("wss://my-app.onrender.com", ServerAddressParser.toSignalingWsUrl(ep))
+    }
+
+    @Test
+    fun productionRenderHttpsLink_connectsViaWss() {
+        val ep = ServerAddressParser.parse(
+            "https://attendance-help-android.onrender.com",
+            defaultPort
+        ).getOrThrow()
+        assertEquals("attendance-help-android.onrender.com", ep.host)
+        assertEquals(443, ep.port)
+        assertTrue(ep.secure)
+        assertEquals(
+            "wss://attendance-help-android.onrender.com",
+            ServerAddressParser.toSignalingWsUrl(ep)
+        )
+    }
+
+    @Test
+    fun productionRenderHostOnly_connectsViaWss() {
+        val ep = ServerAddressParser.parse(
+            ServerAddressParser.DEFAULT_CLOUD_HUB,
+            defaultPort
+        ).getOrThrow()
+        assertEquals(
+            "wss://attendance-help-android.onrender.com",
+            ServerAddressParser.toSignalingWsUrl(ep)
+        )
+    }
+
+    @Test
+    fun productionRenderHttpsTrailingSlash_connectsViaWss() {
+        val ep = ServerAddressParser.parse(
+            "https://attendance-help-android.onrender.com/",
+            defaultPort
+        ).getOrThrow()
+        assertEquals("attendance-help-android.onrender.com", ep.host)
+        assertEquals(
+            "wss://attendance-help-android.onrender.com",
+            ServerAddressParser.toSignalingWsUrl(ep)
+        )
     }
 
     @Test

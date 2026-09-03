@@ -11,10 +11,10 @@
     <string name="back_action">Back</string>
 
     <string name="connect_title">1. Connect to server</string>
-    <string name="connect_hint">Enter your cloud hub URL (Render or similar).</string>
-    <string name="connect_ip_example">Example: your-service.onrender.com</string>
+    <string name="connect_hint">Enter your cloud hub URL (Render) or a LAN IP for a local hub.</string>
+    <string name="connect_ip_example">Cloud: attendance-help-android.onrender.com  ·  LAN: PC IP from start-hub.bat</string>
     <string name="server_ip_label">Server address</string>
-    <string name="server_ip_placeholder">your-service.onrender.com</string>
+    <string name="server_ip_placeholder">attendance-help-android.onrender.com</string>
     <string name="phone_name_label">This phone name</string>
     <string name="connect_action">Connect to server</string>
     <string name="disconnect_server">Disconnect from server</string>

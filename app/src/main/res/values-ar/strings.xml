@@ -10,10 +10,10 @@
     <string name="back_action">رجوع</string>
 
     <string name="connect_title">1. الاتصال بالخادم</string>
-    <string name="connect_hint">أدخل رابط الخادم السحابي (Render أو ما شابه).</string>
-    <string name="connect_ip_example">مثال: your-service.onrender.com</string>
+    <string name="connect_hint">أدخل رابط الخادم السحابي (Render) أو عنوان IP محلي.</string>
+    <string name="connect_ip_example">سحابة: attendance-help-android.onrender.com  ·  محلي: IP من start-hub.bat</string>
     <string name="server_ip_label">عنوان الخادم</string>
-    <string name="server_ip_placeholder">your-service.onrender.com</string>
+    <string name="server_ip_placeholder">attendance-help-android.onrender.com</string>
     <string name="phone_name_label">اسم هذا الهاتف</string>
     <string name="connect_action">الاتصال بالخادم</string>
     <string name="disconnect_server">قطع الاتصال بالخادم</string>

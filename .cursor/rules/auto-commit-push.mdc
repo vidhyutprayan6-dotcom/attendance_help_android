@@ -1,0 +1,17 @@
+---
+description: Auto-commit and push to main after code changes are finished
+alwaysApply: true
+---
+
+# Auto git commit + push
+
+When all requested code changes in a turn/task are finished:
+
+1. Create a git commit summarizing the work (follow the repo commit protocol: status, diff, log, staged files only, HEREDOC message, no secrets).
+2. Push to `origin main` with a normal `git push` (not `--force` unless the user explicitly asks).
+3. Do not ask the user to push; they will not run git push themselves.
+
+Exceptions:
+- Do not commit if there are no relevant changes.
+- Do not force-push to main/master unless the user explicitly requests it.
+- If push fails (auth/network), report the error and the local commit hash.

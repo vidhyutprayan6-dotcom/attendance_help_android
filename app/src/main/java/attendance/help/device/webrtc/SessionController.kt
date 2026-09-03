@@ -654,6 +654,13 @@ class SessionController @Inject constructor(
                     statusMessage = "Connecting to ${ServerAddressParser.toSignalingWsUrl(endpoint)}…"
                 )
             }
+            // Render free tier sleeps; HTTPS wake + DoH DNS help emulators/VPN DNS failures.
+            if (endpoint.secure) {
+                update { copy(statusMessage = "Waking cloud hub ${endpoint.host}…") }
+                withContext(Dispatchers.IO) {
+                    HubClient.wakeCloudHost(endpoint.host)
+                }
+            }
             openHubClient(ServerAddressParser.toSignalingWsUrl(endpoint))
         } catch (t: Throwable) {
             Timber.e(t, "connectToServer crashed")
@@ -1163,10 +1170,18 @@ class SessionController @Inject constructor(
             },
             onFailure = { t ->
                 scope.launch {
-                    failServer(
-                        t.message?.takeIf { it.isNotBlank() }
-                            ?: "Cannot reach server. Check IP, Wi‑Fi, and that the hub is running."
-                    )
+                    val msg = when {
+                        t is java.net.UnknownHostException ||
+                            t.message?.contains("Unable to resolve host", ignoreCase = true) == true ->
+                            t.message?.takeIf { it.isNotBlank() }
+                                ?: "Cannot resolve server hostname. Check Wi‑Fi/DNS or wake the Render service in a browser."
+                        t.message?.contains("timeout", ignoreCase = true) == true ->
+                            "Connection timed out. If using Render free tier, wait ~30s and tap Connect again."
+                        else ->
+                            t.message?.takeIf { it.isNotBlank() }
+                                ?: "Cannot reach server. Check IP, Wi‑Fi, and that the hub is running."
+                    }
+                    failServer(msg)
                 }
             }
         )

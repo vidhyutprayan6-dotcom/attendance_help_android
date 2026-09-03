@@ -47,9 +47,10 @@
     <string name="control_hint_remote">جهاز التحكم متصل. اسمح بمشاركة الشاشة وفعّل إمكانية الوصول للتحكم الكامل.</string>
     <string name="release_remote">قطع الاتصال بهذا الهاتف البعيد</string>
     <string name="release_from_control">قطع الاتصال بهاتف التحكم</string>
-    <string name="session_main_feed">اضغط لفتح التحكم بملء الشاشة</string>
+    <string name="session_main_feed">شاشة البعيد — المس للتحكم</string>
     <string name="remote_screen_immersive_hint">اسحب للتمرير · المس للتحكم في الهاتف البعيد</string>
     <string name="exit_fullscreen">الخروج من ملء الشاشة</string>
+    <string name="enter_fullscreen">ملء الشاشة</string>
     <string name="camera_feed_label">بث الكاميرا</string>
     <string name="camera_feed_control_video">كاميرا هاتف التحكم</string>
     <string name="remote_screen_label">الهاتف البعيد (تحكم كامل)</string>
@@ -88,6 +89,7 @@
     <string name="start_cameras">تشغيل الكاميرات</string>
     <string name="stop_cameras">إيقاف الكاميرات</string>
     <string name="waiting_control_camera">بانتظار كاميرا التحكم…</string>
+    <string name="waiting_control_camera_idle">ابدأ الكاميرات لعرض كاميرا التحكم هنا</string>
     <string name="camera_preview_placeholder">معاينة كاميرتك</string>
     <string name="camera_capture_notif_title">جلسة الكاميرا</string>
     <string name="camera_capture_notif_text">بث كاميرا التحكم للجلسة البعيدة</string>

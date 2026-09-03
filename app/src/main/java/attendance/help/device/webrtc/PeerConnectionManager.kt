@@ -1065,9 +1065,13 @@ class PeerConnectionManager @Inject constructor(
     /**
      * Starts physical camera capture into the already-negotiated CONTROL camera track.
      * Does NOT renegotiate SDP by itself.
+     * @param forceRestart if true, stop any existing capturer first so a second start is clean.
      */
     @Synchronized
-    fun startControlCameraCapture(localPreview: VideoSink? = null): Result<Unit> {
+    fun startControlCameraCapture(
+        localPreview: VideoSink? = null,
+        forceRestart: Boolean = false
+    ): Result<Unit> {
         return try {
             ensureInitialized()
             if (!ensureControlCameraSenderReady()) {
@@ -1077,7 +1081,12 @@ class PeerConnectionManager @Inject constructor(
                     )
                 )
             }
+            if (forceRestart && (cameraRunning.get() || cameraCapturer != null)) {
+                Timber.tag("CAMERA_CAPTURE").i("CONTROL_CAMERA_FORCE_RESTART")
+                stopControlCameraCapture()
+            }
             if (cameraRunning.get()) {
+                localCameraTrack?.setEnabled(true)
                 localPreview?.let { localCameraTrack?.addSink(it) }
                 return Result.success(Unit)
             }
@@ -1110,6 +1119,7 @@ class PeerConnectionManager @Inject constructor(
                 Triple(1280, 720, 24)
             }
             capturer.startCapture(w, h, fps)
+            localCameraTrack?.setEnabled(true)
             localPreview?.let { sink -> localCameraTrack?.addSink(sink) }
             attachControlFirstFrameProbe()
             cameraRunning.set(true)
@@ -1130,10 +1140,14 @@ class PeerConnectionManager @Inject constructor(
             runCatching { localCameraTrack?.removeSink(sink) }
         }
         controlFirstFrameSink = null
-        if (!cameraRunning.getAndSet(false) && cameraCapturer == null) return
+        if (!cameraRunning.getAndSet(false) && cameraCapturer == null) {
+            runCatching { localCameraTrack?.setEnabled(false) }
+            return
+        }
         runCatching { (cameraCapturer as? CameraVideoCapturer)?.stopCapture() }
         runCatching { cameraCapturer?.dispose() }
         cameraCapturer = null
+        runCatching { localCameraTrack?.setEnabled(false) }
         Timber.tag("CAMERA_CAPTURE").i("CONTROL_CAMERA_CAPTURER_STOP")
         diagnostics.log("CONTROL_CAMERA_CAPTURER_STOP", peerConnection)
     }
@@ -1154,10 +1168,14 @@ class PeerConnectionManager @Inject constructor(
      * Does NOT addTrack to PeerConnection.
      */
     @Synchronized
-    fun startRemoteLocalCameraOnly(): Result<Unit> {
+    fun startRemoteLocalCameraOnly(forceRestart: Boolean = false): Result<Unit> {
         if (isControlRole) return Result.success(Unit)
         return try {
             ensureInitialized()
+            if (forceRestart && (remoteLocalCameraRunning.get() || remoteLocalCameraCapturer != null)) {
+                Timber.tag("CAMERA_CAPTURE").i("REMOTE_LOCAL_CAMERA_FORCE_RESTART")
+                stopRemoteLocalCameraOnly()
+            }
             if (remoteLocalCameraRunning.get()) return Result.success(Unit)
             val (enumerator, deviceName) = selectCameraDevice()
                 ?: return Result.failure(IllegalStateException("EMULATOR_CAMERA_NOT_AVAILABLE or CAMERA_UNAVAILABLE"))
@@ -1258,9 +1276,9 @@ class PeerConnectionManager @Inject constructor(
     /** Compatibility wrapper — CONTROL publishes; REMOTE opens local-only. */
     fun startFrontCamera(publishToPeer: Boolean, localPreview: VideoSink? = null): Result<Unit> {
         return if (publishToPeer || isControlRole) {
-            startControlCameraCapture(localPreview)
+            startControlCameraCapture(localPreview, forceRestart = true)
         } else {
-            startRemoteLocalCameraOnly()
+            startRemoteLocalCameraOnly(forceRestart = true)
         }
     }
 

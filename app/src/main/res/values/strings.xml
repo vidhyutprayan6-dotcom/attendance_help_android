@@ -48,9 +48,10 @@
     <string name="control_hint_remote">Control is connected. Allow screen share and enable Accessibility so this phone can be fully controlled.</string>
     <string name="release_remote">Disconnect from this remote</string>
     <string name="release_from_control">Disconnect from Control</string>
-    <string name="session_main_feed">Tap to open full-screen control</string>
+    <string name="session_main_feed">Remote screen — touch to control</string>
     <string name="remote_screen_immersive_hint">Drag to scroll · tap to control the remote phone</string>
     <string name="exit_fullscreen">Exit full screen</string>
+    <string name="enter_fullscreen">Full screen</string>
     <string name="camera_feed_label">Camera feed</string>
     <string name="camera_feed_control_video">Control phone camera</string>
     <string name="remote_screen_label">Remote phone (full control)</string>
@@ -89,6 +90,7 @@
     <string name="start_cameras">Start cameras</string>
     <string name="stop_cameras">Stop cameras</string>
     <string name="waiting_control_camera">Waiting for Control camera…</string>
+    <string name="waiting_control_camera_idle">Start cameras to show Control camera here</string>
     <string name="camera_preview_placeholder">Your camera preview</string>
     <string name="camera_capture_notif_title">Camera session</string>
     <string name="camera_capture_notif_text">Control camera streaming for remote session</string>

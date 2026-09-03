@@ -107,6 +107,7 @@ class SessionController @Inject constructor(
     private var cameraRenderer: SurfaceViewRenderer? = null
     private var localCameraPreview: SurfaceViewRenderer? = null
     private var inboundCameraTrack: VideoTrack? = null
+    private var inboundCameraFirstFrameSink: org.webrtc.VideoSink? = null
     private var cameraSessionActive = false
     private var remoteCameraFirstFrame = false
     private var remoteScreenReady = false
@@ -262,15 +263,36 @@ class SessionController @Inject constructor(
                     update { copy(statusMessage = "Connect to a peer before starting cameras") }
                     return@withLock
                 }
-                if (!_ui.value.transportConnected) {
+                // Allow start once peer exists (session bound); do not require full STREAMING UI flag.
+                if (!peerConnectionManager.hasPeerConnection() && !_ui.value.transportConnected) {
                     update { copy(statusMessage = "Wait until WebRTC is connected, then start cameras") }
                     return@withLock
                 }
                 val peerId = boundPeerId ?: return@withLock
                 val cmd = cameraSessionManager.newCommandId()
                 if (!cameraSessionManager.beginStart(cmd)) {
-                    update { copy(statusMessage = "Cameras already starting or active") }
-                    return@withLock
+                    // Stale ACTIVE/REQUESTED without a live session — recover so second start works.
+                    val stale = cameraSessionActive &&
+                        (
+                            (_ui.value.mode == DeviceMode.CONTROL &&
+                                peerConnectionManager.isCameraRunning()) ||
+                                (_ui.value.mode == DeviceMode.REMOTE &&
+                                    peerConnectionManager.isRemoteLocalCameraOpen())
+                            )
+                    if (stale) {
+                        update { copy(statusMessage = "Cameras already starting or active") }
+                        return@withLock
+                    }
+                    Timber.tag("CAMERA_SYNC").i(
+                        "CAMERA_START recovering stale state=%s",
+                        cameraSessionManager.currentState()
+                    )
+                    peerConnectionManager.stopFrontCamera()
+                    cameraSessionManager.reset()
+                    if (!cameraSessionManager.beginStart(cmd)) {
+                        update { copy(statusMessage = "Could not start cameras — try Stop then Start") }
+                        return@withLock
+                    }
                 }
                 cameraSessionManager.markPreparing()
                 Timber.tag("CAMERA_SYNC").i(
@@ -282,8 +304,11 @@ class SessionController @Inject constructor(
 
                 when (_ui.value.mode) {
                     DeviceMode.CONTROL -> {
-                        val ok = activateControlCameraLocked()
-                        if (!ok) return@withLock
+                        val ok = activateControlCameraLocked(forceRestart = true)
+                        if (!ok) {
+                            cameraSessionManager.markStopped()
+                            return@withLock
+                        }
                         hubClient?.send(
                             HubMessage.CameraStart(fromId = localDeviceId, toId = peerId)
                         )
@@ -296,12 +321,12 @@ class SessionController @Inject constructor(
                         )
                     }
                     DeviceMode.REMOTE -> {
-                        // Remote always notifies Control first — Control camera must auto-start.
+                        // Notify Control first so its published camera starts/restarts with us.
                         hubClient?.send(
                             HubMessage.CameraStart(fromId = localDeviceId, toId = peerId)
                         )
                         val localOnly = withContext(Dispatchers.Main) {
-                            peerConnectionManager.startRemoteLocalCameraOnly()
+                            peerConnectionManager.startRemoteLocalCameraOnly(forceRestart = true)
                         }
                         if (localOnly.isFailure) {
                             Timber.tag("CAMERA_CAPTURE").w(
@@ -311,6 +336,8 @@ class SessionController @Inject constructor(
                         }
                         cameraSessionActive = true
                         cameraSessionManager.markActive()
+                        // Clear any stale inbound bind so we re-attach after Control restarts.
+                        clearInboundCameraBindLocked()
                         waitForControlCameraTrackLocked()
                         update {
                             copy(
@@ -338,6 +365,7 @@ class SessionController @Inject constructor(
             sessionMutex.withLock {
                 val peerId = boundPeerId
                 val cmd = cameraSessionManager.newCommandId()
+                // Always stop locally even if state was already STOPPING/OFF (clean second start).
                 cameraSessionManager.beginStop(cmd)
                 if (peerId != null) {
                     hubClient?.send(
@@ -359,7 +387,7 @@ class SessionController @Inject constructor(
     }
 
     /** CONTROL: FGS + start capture into camera track (pre-negotiated or pending Remote re-offer). */
-    private suspend fun activateControlCameraLocked(): Boolean {
+    private suspend fun activateControlCameraLocked(forceRestart: Boolean = true): Boolean {
         if (!hasCameraPermission()) {
             cameraSessionManager.markError("PERMISSION_REQUIRED")
             update {
@@ -375,7 +403,10 @@ class SessionController @Inject constructor(
         }
         runCatching { CameraCaptureService.start(context) }
         val result = withContext(Dispatchers.Main) {
-            peerConnectionManager.startControlCameraCapture(localPreview = localCameraPreview)
+            peerConnectionManager.startControlCameraCapture(
+                localPreview = localCameraPreview,
+                forceRestart = forceRestart
+            )
         }
         if (result.isFailure) {
             val reason = result.exceptionOrNull()?.message ?: "CAMERA_ERROR"
@@ -433,8 +464,8 @@ class SessionController @Inject constructor(
     /** Poll for Control camera track without SDP renegotiation. */
     private fun scheduleRemoteCameraTrackPoll() {
         scope.launch {
-            repeat(8) {
-                delay(1_500)
+            repeat(12) {
+                delay(1_000)
                 sessionMutex.withLock {
                     if (!cameraSessionActive || inboundCameraTrack != null) return@withLock
                     waitForControlCameraTrackLocked()
@@ -469,13 +500,17 @@ class SessionController @Inject constructor(
         Timber.tag("CAMERA_SYNC").i("CAMERA_STOPPING")
         cameraSessionActive = false
         remoteCameraFirstFrame = false
+        clearInboundCameraBindLocked()
+        localCameraPreview?.let { preview ->
+            runCatching { peerConnectionManager.detachLocalCameraPreview(preview) }
+        }
         peerConnectionManager.stopFrontCamera()
         runCatching { CameraCaptureService.stop(context) }
         cameraSessionManager.markStopped()
         update {
             copy(
                 dualCamera = DualCameraSessionState(),
-                statusMessage = if (transportConnected) {
+                statusMessage = if (this.transportConnected) {
                     "Cameras stopped"
                 } else {
                     statusMessage
@@ -483,6 +518,19 @@ class SessionController @Inject constructor(
             )
         }
         Timber.tag("CAMERA_SYNC").i("CAMERA_STOPPED")
+    }
+
+    /** Detach inbound Control camera sinks so a second start can rebind cleanly. */
+    private fun clearInboundCameraBindLocked() {
+        cameraRenderer?.let { r ->
+            runCatching { inboundCameraTrack?.removeSink(r) }
+        }
+        inboundCameraFirstFrameSink?.let { sink ->
+            runCatching { inboundCameraTrack?.removeSink(sink) }
+        }
+        inboundCameraFirstFrameSink = null
+        inboundCameraTrack = null
+        remoteCameraFirstFrame = false
     }
 
     fun requestScreenSharePermission() {
@@ -1451,15 +1499,21 @@ class SessionController @Inject constructor(
                         )
                         when (_ui.value.mode) {
                             DeviceMode.CONTROL -> {
-                                // Control camera must auto-start whenever Remote (or peer) requests cameras.
+                                // Peer asked to start — always restart Control published camera cleanly.
                                 if (!cameraSessionManager.beginStart(cmd)) {
                                     Timber.tag("CAMERA_SYNC").i(
-                                        "CAMERA_START while active — re-sync Control camera"
+                                        "CAMERA_START while %s — force restart Control camera",
+                                        cameraSessionManager.currentState()
                                     )
-                                } else {
-                                    cameraSessionManager.markPreparing()
+                                    peerConnectionManager.stopFrontCamera()
+                                    cameraSessionManager.reset()
+                                    if (!cameraSessionManager.beginStart(cmd)) {
+                                        update { copy(statusMessage = "Could not restart cameras") }
+                                        return@withLock
+                                    }
                                 }
-                                val ok = activateControlCameraLocked()
+                                cameraSessionManager.markPreparing()
+                                val ok = activateControlCameraLocked(forceRestart = true)
                                 if (ok) {
                                     markCameraUiActiveLocked(
                                         if (peerConnectionManager.isControlCameraSenderAttached()) {
@@ -1468,23 +1522,40 @@ class SessionController @Inject constructor(
                                             context.getString(R.string.camera_reconnect_required)
                                         }
                                     )
+                                } else {
+                                    cameraSessionManager.markStopped()
                                 }
                             }
                             DeviceMode.REMOTE -> {
                                 if (!cameraSessionManager.beginStart(cmd)) {
                                     if (cameraSessionActive) {
+                                        // Peer re-started — clear stale inbound and wait for new frames.
+                                        clearInboundCameraBindLocked()
                                         waitForControlCameraTrackLocked()
                                         scheduleRemoteCameraTrackPoll()
+                                        update {
+                                            copy(
+                                                dualCamera = DualCameraSessionState(
+                                                    isActive = true,
+                                                    bothCamerasOn = true,
+                                                    controlShowsRemoteFeed = true,
+                                                    remoteShowsControlFeed = false
+                                                ),
+                                                statusMessage = cameraStatusMessageLocked()
+                                            )
+                                        }
                                         return@withLock
                                     }
-                                } else {
-                                    cameraSessionManager.markPreparing()
+                                    cameraSessionManager.reset()
+                                    if (!cameraSessionManager.beginStart(cmd)) return@withLock
                                 }
+                                cameraSessionManager.markPreparing()
                                 val localOnly = withContext(Dispatchers.Main) {
-                                    peerConnectionManager.startRemoteLocalCameraOnly()
+                                    peerConnectionManager.startRemoteLocalCameraOnly(forceRestart = true)
                                 }
                                 cameraSessionActive = true
                                 cameraSessionManager.markActive()
+                                clearInboundCameraBindLocked()
                                 waitForControlCameraTrackLocked()
                                 scheduleRemoteCameraTrackPoll()
                                 update {
@@ -1742,14 +1813,18 @@ class SessionController @Inject constructor(
     }
 
     private fun attachInboundCameraTrackLocked(track: VideoTrack) {
-        if (inboundCameraTrack?.id() == track.id()) {
+        if (inboundCameraTrack?.id() == track.id() && inboundCameraFirstFrameSink != null) {
             rebindInboundCameraRendererLocked()
             return
         }
         logCameraDebug("REMOTE_CONTROL_CAMERA_TRACK_RECEIVED id=${track.id()}")
         cameraRenderer?.let { r -> inboundCameraTrack?.removeSink(r) }
+        inboundCameraFirstFrameSink?.let { sink ->
+            runCatching { inboundCameraTrack?.removeSink(sink) }
+        }
         inboundCameraTrack = track
         track.setEnabled(true)
+        remoteCameraFirstFrame = false
         val firstFrame = object : org.webrtc.VideoSink {
             private val seen = java.util.concurrent.atomic.AtomicBoolean(false)
             override fun onFrame(frame: org.webrtc.VideoFrame) {
@@ -1772,6 +1847,7 @@ class SessionController @Inject constructor(
                 }
             }
         }
+        inboundCameraFirstFrameSink = firstFrame
         track.addSink(firstFrame)
         rebindInboundCameraRendererLocked()
         if (cameraSessionActive) {

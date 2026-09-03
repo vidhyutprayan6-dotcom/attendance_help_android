@@ -40,12 +40,12 @@ class CameraSessionManager @Inject constructor() {
                     Timber.tag("CAMERA_SYNC").i("CAMERA_START ignored already=%s cmd=%s", cur, commandId)
                     return false
                 }
-                CameraSessionState.STOPPING -> return false
-                CameraSessionState.OFF, CameraSessionState.ERROR -> {
+                // STOPPING/ERROR must not block a clean second start after stop.
+                CameraSessionState.STOPPING, CameraSessionState.OFF, CameraSessionState.ERROR -> {
                     if (state.compareAndSet(cur, CameraSessionState.REQUESTED)) {
                         activeCommandId = commandId
                         lastError = ""
-                        Timber.tag("CAMERA_SYNC").i("CAMERA_START_REQUEST cmd=%s", commandId)
+                        Timber.tag("CAMERA_SYNC").i("CAMERA_START_REQUEST cmd=%s from=%s", commandId, cur)
                         return true
                     }
                 }

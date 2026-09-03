@@ -82,6 +82,9 @@ fun SessionScreen(
             state.sessionLinkState == SessionLinkState.STREAMING)
     val camerasOn = state.dualCamera.isActive
     val controlSessionActive = mode == DeviceMode.CONTROL && sessionActive
+    // Enable Start whenever the session is bound; SessionController still gates on WebRTC.
+    val camerasStartEnabled = sessionActive
+    val waitingControlCamera = camerasOn && !state.dualCamera.remoteShowsControlFeed
 
     val cameraPermission = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -237,9 +240,15 @@ fun SessionScreen(
                         cameraRenderer = null
                     }
                 )
-                if (!camerasOn) {
+                if (waitingControlCamera) {
                     Text(
                         text = stringResource(R.string.waiting_control_camera),
+                        color = Color.White,
+                        modifier = Modifier.align(Alignment.Center)
+                    )
+                } else if (!camerasOn) {
+                    Text(
+                        text = stringResource(R.string.waiting_control_camera_idle),
                         color = Color.White,
                         modifier = Modifier.align(Alignment.Center)
                     )
@@ -258,7 +267,7 @@ fun SessionScreen(
                 Button(
                     onClick = { requestStartCamera() },
                     modifier = Modifier.fillMaxWidth(),
-                    enabled = state.transportConnected
+                    enabled = camerasStartEnabled
                 ) { Text(stringResource(R.string.start_cameras)) }
             }
         }
@@ -272,10 +281,21 @@ fun SessionScreen(
                 state.sessionLinkState == SessionLinkState.STREAMING
 
             if (!immersiveRemoteControl) {
-                Text(
-                    text = stringResource(R.string.remote_screen_label),
-                    style = MaterialTheme.typography.titleMedium
-                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = stringResource(R.string.remote_screen_label),
+                        style = MaterialTheme.typography.titleMedium
+                    )
+                    if (streamReady) {
+                        OutlinedButton(onClick = { immersiveRemoteControl = true }) {
+                            Text(stringResource(R.string.enter_fullscreen))
+                        }
+                    }
+                }
             }
 
             Box(
@@ -295,6 +315,8 @@ fun SessionScreen(
                 AndroidView(
                     factory = { ctx ->
                         SurfaceViewRenderer(ctx).also { renderer ->
+                            // Keep under Compose overlays so Back/Home/Recents stay clickable.
+                            renderer.setZOrderMediaOverlay(false)
                             screenRenderer = renderer
                         }
                     },
@@ -306,11 +328,8 @@ fun SessionScreen(
                             touchPath = touchPath,
                             getDownTime = { downTime },
                             setDownTime = { downTime = it },
-                            immersive = immersiveRemoteControl,
-                            streamReady = streamReady,
                             onTap = onTap,
-                            onSwipe = onSwipe,
-                            onEnterImmersive = { immersiveRemoteControl = true }
+                            onSwipe = onSwipe
                         )
                     },
                     modifier = Modifier.fillMaxSize(),
@@ -338,14 +357,6 @@ fun SessionScreen(
                                 .align(Alignment.TopStart)
                                 .padding(12.dp)
                         )
-                        OutlinedButton(
-                            onClick = { immersiveRemoteControl = false },
-                            modifier = Modifier
-                                .align(Alignment.TopEnd)
-                                .padding(12.dp)
-                        ) {
-                            Text(stringResource(R.string.exit_fullscreen))
-                        }
                     }
                     else -> {
                         Text(
@@ -362,9 +373,10 @@ fun SessionScreen(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .then(
-                        if (immersiveRemoteControl) Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
-                        else Modifier
+                    .background(MaterialTheme.colorScheme.background)
+                    .padding(
+                        horizontal = if (immersiveRemoteControl) 16.dp else 0.dp,
+                        vertical = if (immersiveRemoteControl) 8.dp else 0.dp
                     ),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
@@ -380,6 +392,17 @@ fun SessionScreen(
                     onClick = { onRemoteKey(CommandTypes.KEY_RECENTS) },
                     modifier = Modifier.weight(1f)
                 ) { Text(stringResource(R.string.key_recents)) }
+            }
+            if (immersiveRemoteControl) {
+                OutlinedButton(
+                    onClick = { immersiveRemoteControl = false },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(MaterialTheme.colorScheme.background)
+                        .padding(horizontal = 16.dp, vertical = 4.dp)
+                ) {
+                    Text(stringResource(R.string.exit_fullscreen))
+                }
             }
 
             if (!immersiveRemoteControl) {
@@ -415,7 +438,7 @@ fun SessionScreen(
                     Button(
                         onClick = { requestStartCamera() },
                         modifier = Modifier.fillMaxWidth(),
-                        enabled = state.transportConnected
+                        enabled = camerasStartEnabled
                     ) { Text(stringResource(R.string.start_cameras)) }
                 } else {
                     OutlinedButton(
@@ -455,11 +478,8 @@ private fun attachRemoteScreenTouchListener(
     touchPath: MutableList<Pair<Float, Float>>,
     getDownTime: () -> Long,
     setDownTime: (Long) -> Unit,
-    immersive: Boolean,
-    streamReady: Boolean,
     onTap: (x: Float, y: Float) -> Unit,
-    onSwipe: (points: List<Pair<Float, Float>>, durationMs: Long) -> Unit,
-    onEnterImmersive: () -> Unit
+    onSwipe: (points: List<Pair<Float, Float>>, durationMs: Long) -> Unit
 ) {
     view.setOnTouchListener { v, event ->
         val rendered = VideoCoordinateMapper.computeRenderedVideoRect(
@@ -500,15 +520,11 @@ private fun attachRemoteScreenTouchListener(
                 if (norm != null) {
                     val duration = (System.currentTimeMillis() - getDownTime())
                         .coerceAtLeast(50L)
-                    if (!immersive && streamReady && touchPath.size <= 1) {
-                        onEnterImmersive()
-                    } else if (immersive) {
-                        if (touchPath.size <= 1) {
-                            onTap(norm.first, norm.second)
-                        } else {
-                            touchPath.add(norm)
-                            onSwipe(touchPath.toList(), duration)
-                        }
+                    if (touchPath.size <= 1) {
+                        onTap(norm.first, norm.second)
+                    } else {
+                        touchPath.add(norm)
+                        onSwipe(touchPath.toList(), duration)
                     }
                 }
                 touchPath.clear()

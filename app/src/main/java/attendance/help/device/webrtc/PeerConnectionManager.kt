@@ -51,7 +51,6 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.Inject
 import javax.inject.Singleton
-import kotlin.math.min
 
 data class WebRtcListeners(
     val onIceCandidate: (IceCandidate) -> Unit,
@@ -207,6 +206,10 @@ class PeerConnectionManager @Inject constructor(
             }
             renderer.setMirror(mirror)
             renderer.setEnableHardwareScaler(true)
+            renderer.setScalingType(
+                org.webrtc.RendererCommon.ScalingType.SCALE_ASPECT_FIT,
+                org.webrtc.RendererCommon.ScalingType.SCALE_ASPECT_FIT
+            )
             true
         }.getOrElse { error ->
             Timber.tag("WEBRTC").e(error, "initRenderer failed")
@@ -613,16 +616,17 @@ class PeerConnectionManager @Inject constructor(
 
     private fun captureDimensions(): Triple<Int, Int, Int> {
         val dm = context.resources.displayMetrics
-        return if (DeviceHints.isProbablyEmulator()) {
-            Triple(640, 480, 15)
-        } else {
-            // 720p-class @ 24fps — good balance for two physical phones (latency over 4K).
-            Triple(
-                even(min(dm.widthPixels, 1280)),
-                even(min(dm.heightPixels, 720)),
-                24
-            )
+        if (DeviceHints.isProbablyEmulator()) {
+            return Triple(640, 480, 15)
         }
+        // Preserve real display aspect so CONTROL letterbox mapping matches Remote screen.
+        val srcW = dm.widthPixels.coerceAtLeast(2)
+        val srcH = dm.heightPixels.coerceAtLeast(2)
+        val maxEdge = 1280
+        val scale = minOf(1f, maxEdge.toFloat() / maxOf(srcW, srcH).toFloat())
+        val w = even((srcW * scale).toInt().coerceAtLeast(2))
+        val h = even((srcH * scale).toInt().coerceAtLeast(2))
+        return Triple(w, h, 30)
     }
 
     private fun tuneScreenVideoSender(screenTx: RtpTransceiver?, fps: Int) {

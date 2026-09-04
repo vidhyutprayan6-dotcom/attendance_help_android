@@ -4,6 +4,7 @@ import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
 import android.content.Intent
 import android.graphics.Path
+import android.graphics.Rect
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -18,7 +19,8 @@ import timber.log.Timber
  * Injects taps/swipes on the Remote phone so Control can fully operate it.
  * User must enable this service manually in Android Accessibility settings.
  *
- * Accessibility gestures use **real display pixels** (not encoded capture size).
+ * Taps: try AccessibilityNode ACTION_CLICK first (needed for many Home launchers),
+ * then fall back to a realistic coordinate gesture. Swipes use gestures only.
  */
 class RemoteInputAccessibilityService : AccessibilityService() {
 
@@ -70,6 +72,17 @@ class RemoteInputAccessibilityService : AccessibilityService() {
             captureWidth,
             captureHeight
         )
+
+        // Home launchers often ignore coordinate gestures but honor node clicks (Recents-like).
+        if (clickNodeAt(px, py)) {
+            Timber.tag(TAP_TAG).i(
+                "REMOTE_TAP_COMPLETED remote_x=%.1f remote_y=%.1f via=node_click",
+                px,
+                py
+            )
+            return true
+        }
+
         val path = Path().apply { moveTo(px, py) }
         val stroke = GestureDescription.StrokeDescription(path, 0, duration)
         return dispatchLoggedGesture(stroke, isTap = true, px = px, py = py)
@@ -128,6 +141,66 @@ class RemoteInputAccessibilityService : AccessibilityService() {
         return ok
     }
 
+    private fun clickNodeAt(x: Float, y: Float): Boolean {
+        val root = rootInActiveWindow ?: run {
+            Timber.tag(TAP_TAG).i("REMOTE_TAP_NODE_CLICK miss reason=no_root x=%.0f y=%.0f", x, y)
+            return false
+        }
+        val target = findBestClickableNode(root, x, y)
+        val clicked = target?.let { node ->
+            var ok = node.isEnabled && node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+            if (!ok) {
+                node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+                ok = node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+            }
+            Timber.tag(TAP_TAG).i(
+                "REMOTE_TAP_NODE_CLICK x=%.0f y=%.0f ok=%s cls=%s text=%s",
+                x,
+                y,
+                ok,
+                node.className,
+                node.text ?: node.contentDescription
+            )
+            node.recycle()
+            ok
+        } ?: run {
+            Timber.tag(TAP_TAG).i("REMOTE_TAP_NODE_CLICK miss reason=no_node x=%.0f y=%.0f", x, y)
+            false
+        }
+        runCatching { root.recycle() }
+        return clicked
+    }
+
+    private fun findBestClickableNode(
+        root: AccessibilityNodeInfo,
+        x: Float,
+        y: Float
+    ): AccessibilityNodeInfo? {
+        var best: AccessibilityNodeInfo? = null
+        var bestArea = Int.MAX_VALUE
+        fun visit(node: AccessibilityNodeInfo) {
+            val bounds = Rect()
+            node.getBoundsInScreen(bounds)
+            if (!bounds.contains(x.toInt(), y.toInt())) return
+            val area = bounds.width().coerceAtLeast(1) * bounds.height().coerceAtLeast(1)
+            val (sw, sh) = displaySize()
+            val maxUseful = (sw * sh) / 2
+            if (node.isClickable && node.isEnabled && area < bestArea && area < maxUseful) {
+                best?.recycle()
+                best = AccessibilityNodeInfo.obtain(node)
+                bestArea = area
+            }
+            for (i in 0 until node.childCount) {
+                node.getChild(i)?.let { child ->
+                    visit(child)
+                    child.recycle()
+                }
+            }
+        }
+        visit(root)
+        return best
+    }
+
     private fun dispatchLoggedGesture(
         stroke: GestureDescription.StrokeDescription,
         isTap: Boolean,
@@ -140,7 +213,7 @@ class RemoteInputAccessibilityService : AccessibilityService() {
                 override fun onCompleted(gestureDescription: GestureDescription?) {
                     if (isTap) {
                         Timber.tag(TAP_TAG).i(
-                            "REMOTE_TAP_COMPLETED remote_x=%.1f remote_y=%.1f",
+                            "REMOTE_TAP_COMPLETED remote_x=%.1f remote_y=%.1f via=gesture",
                             px,
                             py
                         )
@@ -176,10 +249,6 @@ class RemoteInputAccessibilityService : AccessibilityService() {
         return platform.coerceIn(80L, 120L)
     }
 
-    /**
-     * Map normalized 0..1 to **display** pixels for Accessibility injection.
-     * Encoded capture size must not be used here — gestures operate in screen space.
-     */
     private fun toDisplayPixels(normalizedX: Float, normalizedY: Float): Pair<Float, Float> {
         val (w, h) = displaySize()
         val x = (normalizedX.coerceIn(0f, 1f) * w).coerceIn(1f, (w - 2).toFloat().coerceAtLeast(1f))

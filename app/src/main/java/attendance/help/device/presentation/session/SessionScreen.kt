@@ -277,8 +277,8 @@ fun SessionScreen(
         }
 
         if (controlSessionActive) {
-            val videoW = state.captureGeometry.captureWidth.takeIf { it > 0 } ?: 1280
-            val videoH = state.captureGeometry.captureHeight.takeIf { it > 0 } ?: 720
+            val videoW = state.captureGeometry.captureWidth.takeIf { it > 0 } ?: 1080
+            val videoH = state.captureGeometry.captureHeight.takeIf { it > 0 } ?: 1920
             val touchPath = remember { mutableStateListOf<Pair<Float, Float>>() }
             var downTime by remember { mutableLongStateOf(0L) }
             var downViewX by remember { mutableFloatStateOf(0f) }
@@ -370,34 +370,17 @@ fun SessionScreen(
                             modifier = Modifier.align(Alignment.Center)
                         )
                     }
-                    immersiveRemoteControl -> {
-                        Text(
-                            text = stringResource(R.string.remote_screen_immersive_hint),
-                            color = Color.White,
-                            modifier = Modifier
-                                .align(Alignment.TopStart)
-                                .padding(12.dp)
-                        )
-                    }
-                    else -> {
-                        Text(
-                            text = stringResource(R.string.session_main_feed),
-                            color = Color.White,
-                            modifier = Modifier
-                                .align(Alignment.TopStart)
-                                .padding(8.dp)
-                        )
-                    }
                 }
             }
 
+            // Always keep Back / Home / Recents (and Exit in fullscreen) under the video.
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .background(MaterialTheme.colorScheme.background)
                     .padding(
-                        horizontal = if (immersiveRemoteControl) 16.dp else 0.dp,
-                        vertical = if (immersiveRemoteControl) 8.dp else 0.dp
+                        horizontal = if (immersiveRemoteControl) 12.dp else 0.dp,
+                        vertical = if (immersiveRemoteControl) 6.dp else 0.dp
                     ),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
@@ -420,7 +403,7 @@ fun SessionScreen(
                     modifier = Modifier
                         .fillMaxWidth()
                         .background(MaterialTheme.colorScheme.background)
-                        .padding(horizontal = 16.dp, vertical = 4.dp)
+                        .padding(horizontal = 12.dp, vertical = 4.dp)
                 ) {
                     Text(stringResource(R.string.exit_fullscreen))
                 }

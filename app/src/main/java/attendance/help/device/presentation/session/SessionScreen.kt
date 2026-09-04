@@ -5,6 +5,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.provider.Settings
 import android.view.MotionEvent
+import android.view.ViewConfiguration
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -29,6 +30,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -43,6 +45,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import attendance.help.device.R
+import attendance.help.device.control.RemoteGestureClassifier
 import attendance.help.device.control.VideoCoordinateMapper
 import attendance.help.device.device.command.CommandTypes
 import attendance.help.device.domain.model.AppLinkSnapshot
@@ -50,6 +53,7 @@ import attendance.help.device.domain.model.DeviceMode
 import attendance.help.device.domain.model.RemoteSessionState
 import attendance.help.device.domain.model.SessionLinkState
 import org.webrtc.SurfaceViewRenderer
+import timber.log.Timber
 
 @Composable
 fun SessionScreen(
@@ -277,6 +281,13 @@ fun SessionScreen(
             val videoH = state.captureGeometry.captureHeight.takeIf { it > 0 } ?: 720
             val touchPath = remember { mutableStateListOf<Pair<Float, Float>>() }
             var downTime by remember { mutableLongStateOf(0L) }
+            var downViewX by remember { mutableFloatStateOf(0f) }
+            var downViewY by remember { mutableFloatStateOf(0f) }
+            var downNorm by remember { mutableStateOf<Pair<Float, Float>?>(null) }
+            var maxDisplacementPx by remember { mutableFloatStateOf(0f) }
+            val touchSlopPx = remember(context) {
+                ViewConfiguration.get(context).scaledTouchSlop.toFloat()
+            }
             val streamReady = state.screenShareActive ||
                 state.sessionLinkState == SessionLinkState.STREAMING
 
@@ -326,8 +337,18 @@ fun SessionScreen(
                             videoW = videoW,
                             videoH = videoH,
                             touchPath = touchPath,
+                            touchSlopPx = touchSlopPx,
                             getDownTime = { downTime },
                             setDownTime = { downTime = it },
+                            getDownView = { downViewX to downViewY },
+                            setDownView = { x, y ->
+                                downViewX = x
+                                downViewY = y
+                            },
+                            getDownNorm = { downNorm },
+                            setDownNorm = { downNorm = it },
+                            getMaxDisplacementPx = { maxDisplacementPx },
+                            setMaxDisplacementPx = { maxDisplacementPx = it },
                             onTap = onTap,
                             onSwipe = onSwipe
                         )
@@ -476,8 +497,15 @@ private fun attachRemoteScreenTouchListener(
     videoW: Int,
     videoH: Int,
     touchPath: MutableList<Pair<Float, Float>>,
+    touchSlopPx: Float,
     getDownTime: () -> Long,
     setDownTime: (Long) -> Unit,
+    getDownView: () -> Pair<Float, Float>,
+    setDownView: (Float, Float) -> Unit,
+    getDownNorm: () -> Pair<Float, Float>?,
+    setDownNorm: (Pair<Float, Float>?) -> Unit,
+    getMaxDisplacementPx: () -> Float,
+    setMaxDisplacementPx: (Float) -> Unit,
     onTap: (x: Float, y: Float) -> Unit,
     onSwipe: (points: List<Pair<Float, Float>>, durationMs: Long) -> Unit
 ) {
@@ -492,42 +520,75 @@ private fun attachRemoteScreenTouchListener(
             MotionEvent.ACTION_DOWN -> {
                 touchPath.clear()
                 setDownTime(System.currentTimeMillis())
-                VideoCoordinateMapper.touchToNormalized(
-                    event.x,
-                    event.y,
-                    rendered
-                )?.let { (nx, ny) ->
-                    touchPath.add(nx to ny)
+                setDownView(event.x, event.y)
+                setMaxDisplacementPx(0f)
+                val norm = VideoCoordinateMapper.touchToNormalized(event.x, event.y, rendered)
+                setDownNorm(norm)
+                if (norm != null) {
+                    touchPath.add(norm)
+                    Timber.tag("REMOTE_TAP").i(
+                        "CONTROL_TOUCH_DOWN view=%.1f,%.1f norm=%.4f,%.4f videoRect=%.0f,%.0f,%.0fx%.0f pointer=%d",
+                        event.x,
+                        event.y,
+                        norm.first,
+                        norm.second,
+                        rendered.left,
+                        rendered.top,
+                        rendered.width,
+                        rendered.height,
+                        event.getPointerId(0)
+                    )
                 }
             }
             MotionEvent.ACTION_MOVE -> {
-                VideoCoordinateMapper.touchToNormalized(
-                    event.x,
-                    event.y,
-                    rendered
-                )?.let { (nx, ny) ->
+                val (dx0, dy0) = getDownView()
+                val disp = RemoteGestureClassifier.displacementPx(dx0, dy0, event.x, event.y)
+                if (disp > getMaxDisplacementPx()) setMaxDisplacementPx(disp)
+                VideoCoordinateMapper.touchToNormalized(event.x, event.y, rendered)?.let { (nx, ny) ->
                     if (touchPath.isEmpty() || touchPath.last() != nx to ny) {
                         touchPath.add(nx to ny)
                     }
                 }
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                val norm = VideoCoordinateMapper.touchToNormalized(
-                    event.x,
-                    event.y,
-                    rendered
+                val cancelled = event.actionMasked == MotionEvent.ACTION_CANCEL
+                val (dx0, dy0) = getDownView()
+                val disp = RemoteGestureClassifier.displacementPx(dx0, dy0, event.x, event.y)
+                    .coerceAtLeast(getMaxDisplacementPx())
+                val upNorm = VideoCoordinateMapper.touchToNormalized(event.x, event.y, rendered)
+                val duration = (System.currentTimeMillis() - getDownTime()).coerceAtLeast(1L)
+                val classified = RemoteGestureClassifier.classify(
+                    cancelled = cancelled,
+                    downNormalized = getDownNorm(),
+                    upNormalized = upNorm,
+                    pathNormalized = touchPath.toList(),
+                    maxDisplacementPx = disp,
+                    durationMs = duration,
+                    touchSlopPx = touchSlopPx
                 )
-                if (norm != null) {
-                    val duration = (System.currentTimeMillis() - getDownTime())
-                        .coerceAtLeast(50L)
-                    if (touchPath.size <= 1) {
-                        onTap(norm.first, norm.second)
-                    } else {
-                        touchPath.add(norm)
-                        onSwipe(touchPath.toList(), duration)
+                Timber.tag("REMOTE_TAP").i(
+                    "CONTROL_GESTURE_CLASSIFIED kind=%s start=%s end=%s maxDisp=%.1f " +
+                        "duration=%d slop=%.1f",
+                    classified.kind,
+                    classified.tapPoint ?: classified.swipePoints.firstOrNull(),
+                    upNorm,
+                    classified.maxDisplacementPx,
+                    classified.durationMs,
+                    classified.touchSlopPx
+                )
+                when (classified.kind) {
+                    RemoteGestureClassifier.Kind.TAP -> {
+                        val point = classified.tapPoint
+                        if (point != null) onTap(point.first, point.second)
                     }
+                    RemoteGestureClassifier.Kind.SWIPE -> {
+                        onSwipe(classified.swipePoints, classified.durationMs)
+                    }
+                    RemoteGestureClassifier.Kind.CANCEL -> Unit
                 }
                 touchPath.clear()
+                setDownNorm(null)
+                setMaxDisplacementPx(0f)
             }
         }
         true

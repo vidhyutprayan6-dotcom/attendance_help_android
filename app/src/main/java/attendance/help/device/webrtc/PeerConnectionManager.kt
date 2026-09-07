@@ -619,14 +619,15 @@ class PeerConnectionManager @Inject constructor(
         if (DeviceHints.isProbablyEmulator()) {
             return Triple(640, 480, 15)
         }
-        // Preserve real display aspect so CONTROL letterbox mapping matches Remote screen.
+        // Keep Remote display aspect for correct CONTROL letterboxing / clicks,
+        // but cap encode size + fps so HW encoders stay stable (tall 1280@30 caused drops).
         val srcW = dm.widthPixels.coerceAtLeast(2)
         val srcH = dm.heightPixels.coerceAtLeast(2)
-        val maxEdge = 1280
-        val scale = minOf(1f, maxEdge.toFloat() / maxOf(srcW, srcH).toFloat())
+        val maxLongEdge = 900
+        val scale = minOf(1f, maxLongEdge.toFloat() / maxOf(srcW, srcH).toFloat())
         val w = even((srcW * scale).toInt().coerceAtLeast(2))
         val h = even((srcH * scale).toInt().coerceAtLeast(2))
-        return Triple(w, h, 30)
+        return Triple(w, h, 24)
     }
 
     private fun tuneScreenVideoSender(screenTx: RtpTransceiver?, fps: Int) {
@@ -635,11 +636,12 @@ class PeerConnectionManager @Inject constructor(
             val params = screenTx.sender.parameters
             params.degradationPreference = RtpParameters.DegradationPreference.MAINTAIN_FRAMERATE
             if (params.encodings.isNotEmpty()) {
-                params.encodings[0].maxBitrateBps = 2_500_000
+                // Match bitrate to modest screen encode — avoids peer/encoder stalls.
+                params.encodings[0].maxBitrateBps = 1_800_000
                 params.encodings[0].maxFramerate = fps
             }
             screenTx.sender.parameters = params
-            diagnostics.log("SCREEN_SENDER_TUNED maxBitrate=2500000 fps=$fps", peerConnection)
+            diagnostics.log("SCREEN_SENDER_TUNED maxBitrate=1800000 fps=$fps", peerConnection)
         }.onFailure { Timber.tag("WEBRTC").w(it, "tuneScreenVideoSender failed") }
     }
 

@@ -1760,9 +1760,15 @@ class SessionController @Inject constructor(
                         }
                     }
                     PeerConnection.PeerConnectionState.DISCONNECTED -> {
-                        if (boundPeerId != null && _ui.value.transportConnected) {
-                            handleWebRtcFailure("WebRTC disconnected")
+                        // Transient ICE flap — do NOT reconnect here. Reconnect tears down the
+                        // peer and drops screen/camera. Only FAILED triggers clean reconnect.
+                        Timber.i("WebRTC DISCONNECTED (non-fatal while bound) — waiting for recovery")
+                        update {
+                            copy(statusMessage = "Link unstable — waiting to recover…")
                         }
+                    }
+                    PeerConnection.PeerConnectionState.CONNECTED -> {
+                        webrtcRetryCount = 0
                     }
                     else -> Unit
                 }

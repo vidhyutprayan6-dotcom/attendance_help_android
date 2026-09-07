@@ -1,6 +1,7 @@
 package attendance.help.device.device.control
 
 import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.AccessibilityServiceInfo
 import android.accessibilityservice.GestureDescription
 import android.content.Intent
 import android.graphics.Path
@@ -13,14 +14,17 @@ import android.view.ViewConfiguration
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import android.view.accessibility.AccessibilityWindowInfo
 import timber.log.Timber
 
 /**
  * Injects taps/swipes on the Remote phone so Control can fully operate it.
- * User must enable this service manually in Android Accessibility settings.
  *
- * Taps: try AccessibilityNode ACTION_CLICK first (needed for many Home launchers),
- * then fall back to a realistic coordinate gesture. Swipes use gestures only.
+ * Tap strategy (Home launchers + tiny UI):
+ * 1) [ACTION_CLICK] only on **small** clickable nodes under the point (icon / button sized).
+ *    Candidates are tried smallest-first. Large workspace nodes are ignored — they often
+ *    return true for ACTION_CLICK but do nothing, which previously blocked gesture fallback.
+ * 2) If none succeed → stationary [dispatchGesture] tap at the mapped display pixel.
  */
 class RemoteInputAccessibilityService : AccessibilityService() {
 
@@ -35,6 +39,12 @@ class RemoteInputAccessibilityService : AccessibilityService() {
     override fun onServiceConnected() {
         instance = this
         connected = true
+        serviceInfo = serviceInfo?.apply {
+            flags = flags or
+                AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS or
+                AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS or
+                AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS
+        }
         Timber.tag("REMOTE_CONTROL").i("Accessibility service connected")
     }
 
@@ -73,8 +83,7 @@ class RemoteInputAccessibilityService : AccessibilityService() {
             captureHeight
         )
 
-        // Home launchers often ignore coordinate gestures but honor node clicks (Recents-like).
-        if (clickNodeAt(px, py)) {
+        if (clickSmallTargetsAt(px, py)) {
             Timber.tag(TAP_TAG).i(
                 "REMOTE_TAP_COMPLETED remote_x=%.1f remote_y=%.1f via=node_click",
                 px,
@@ -83,6 +92,7 @@ class RemoteInputAccessibilityService : AccessibilityService() {
             return true
         }
 
+        // Stationary press — a 1px drag can be treated as a micro-swipe by some launchers.
         val path = Path().apply { moveTo(px, py) }
         val stroke = GestureDescription.StrokeDescription(path, 0, duration)
         return dispatchLoggedGesture(stroke, isTap = true, px = px, py = py)
@@ -141,55 +151,123 @@ class RemoteInputAccessibilityService : AccessibilityService() {
         return ok
     }
 
-    private fun clickNodeAt(x: Float, y: Float): Boolean {
-        val root = rootInActiveWindow ?: run {
+    /**
+     * Click icon/button-sized targets under [x],[y]. Large containers are skipped so a
+     * false ACTION_CLICK success cannot block the gesture fallback.
+     */
+    private fun clickSmallTargetsAt(x: Float, y: Float): Boolean {
+        val root = rootForPoint(x, y) ?: run {
             Timber.tag(TAP_TAG).i("REMOTE_TAP_NODE_CLICK miss reason=no_root x=%.0f y=%.0f", x, y)
             return false
         }
-        val target = findBestClickableNode(root, x, y)
-        val clicked = target?.let { node ->
+        val candidates = findSmallClickableCandidates(root, x, y)
+        if (candidates.isEmpty()) {
+            Timber.tag(TAP_TAG).i("REMOTE_TAP_NODE_CLICK miss reason=no_small_node x=%.0f y=%.0f", x, y)
+            runCatching { root.recycle() }
+            return false
+        }
+
+        var clicked = false
+        candidates.forEachIndexed { index, node ->
+            if (clicked) {
+                node.recycle()
+                return@forEachIndexed
+            }
+            val bounds = Rect()
+            node.getBoundsInScreen(bounds)
             var ok = node.isEnabled && node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-            if (!ok) {
+            if (!ok && node.isClickable) {
                 node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
                 ok = node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
             }
             Timber.tag(TAP_TAG).i(
-                "REMOTE_TAP_NODE_CLICK x=%.0f y=%.0f ok=%s cls=%s text=%s",
+                "REMOTE_TAP_NODE_CLICK x=%.0f y=%.0f try=%d ok=%s bounds=%s cls=%s desc=%s",
                 x,
                 y,
+                index,
                 ok,
+                bounds.toShortString(),
                 node.className,
-                node.text ?: node.contentDescription
+                node.contentDescription ?: node.text
             )
             node.recycle()
-            ok
-        } ?: run {
-            Timber.tag(TAP_TAG).i("REMOTE_TAP_NODE_CLICK miss reason=no_node x=%.0f y=%.0f", x, y)
-            false
+            if (ok) clicked = true
         }
         runCatching { root.recycle() }
         return clicked
     }
 
-    private fun findBestClickableNode(
+    private fun rootForPoint(x: Float, y: Float): AccessibilityNodeInfo? {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            val wins = windows
+            if (!wins.isNullOrEmpty()) {
+                val ordered = wins.sortedByDescending { it.layer }
+                for (w in ordered) {
+                    if (w.type != AccessibilityWindowInfo.TYPE_APPLICATION &&
+                        w.type != AccessibilityWindowInfo.TYPE_SPLIT_SCREEN_DIVIDER &&
+                        w.type != AccessibilityWindowInfo.TYPE_SYSTEM
+                    ) {
+                        continue
+                    }
+                    val wb = Rect()
+                    w.getBoundsInScreen(wb)
+                    if (wb.contains(x.toInt(), y.toInt())) {
+                        val root = w.root
+                        if (root != null) return root
+                    }
+                }
+            }
+        }
+        return rootInActiveWindow
+    }
+
+    /**
+     * All small clickable nodes containing the point, sorted by area ascending
+     * (tightest icon/button first).
+     */
+    private fun findSmallClickableCandidates(
         root: AccessibilityNodeInfo,
         x: Float,
         y: Float
-    ): AccessibilityNodeInfo? {
-        var best: AccessibilityNodeInfo? = null
-        var bestArea = Int.MAX_VALUE
+    ): List<AccessibilityNodeInfo> {
+        val density = resources.displayMetrics.density
+        // Typical launcher icon cell ≈ 80–120dp wide, taller with label.
+        val maxW = (140f * density).toInt().coerceAtLeast(96)
+        val maxH = (180f * density).toInt().coerceAtLeast(96)
+        val maxArea = maxW * maxH
+        val ix = x.toInt()
+        val iy = y.toInt()
+
+        data class Cand(val node: AccessibilityNodeInfo, val area: Int, val score: Int)
+
+        val found = ArrayList<Cand>()
+
+        fun score(node: AccessibilityNodeInfo, area: Int): Int {
+            var s = 1_000_000 - area
+            if (node.contentDescription?.isNotBlank() == true || node.text?.isNotBlank() == true) {
+                s += 50_000
+            }
+            if (node.isClickable) s += 20_000
+            return s
+        }
+
+        fun consider(node: AccessibilityNodeInfo) {
+            if (!node.isEnabled) return
+            if (!node.isClickable && !node.isLongClickable) return
+            val bounds = Rect()
+            node.getBoundsInScreen(bounds)
+            if (!bounds.contains(ix, iy)) return
+            if (bounds.width() > maxW || bounds.height() > maxH) return
+            val area = bounds.width().coerceAtLeast(1) * bounds.height().coerceAtLeast(1)
+            if (area > maxArea) return
+            found.add(Cand(AccessibilityNodeInfo.obtain(node), area, score(node, area)))
+        }
+
         fun visit(node: AccessibilityNodeInfo) {
             val bounds = Rect()
             node.getBoundsInScreen(bounds)
-            if (!bounds.contains(x.toInt(), y.toInt())) return
-            val area = bounds.width().coerceAtLeast(1) * bounds.height().coerceAtLeast(1)
-            val (sw, sh) = displaySize()
-            val maxUseful = (sw * sh) / 2
-            if (node.isClickable && node.isEnabled && area < bestArea && area < maxUseful) {
-                best?.recycle()
-                best = AccessibilityNodeInfo.obtain(node)
-                bestArea = area
-            }
+            if (!bounds.contains(ix, iy)) return
+            consider(node)
             for (i in 0 until node.childCount) {
                 node.getChild(i)?.let { child ->
                     visit(child)
@@ -197,8 +275,12 @@ class RemoteInputAccessibilityService : AccessibilityService() {
                 }
             }
         }
+
         visit(root)
-        return best
+
+        // Deduplicate by bounds+class, keep highest score per area bucket.
+        found.sortWith(compareBy<Cand> { it.area }.thenByDescending { it.score })
+        return found.map { it.node }
     }
 
     private fun dispatchLoggedGesture(
@@ -246,13 +328,15 @@ class RemoteInputAccessibilityService : AccessibilityService() {
         val platform = runCatching {
             ViewConfiguration.getTapTimeout().toLong()
         }.getOrDefault(100L)
-        return platform.coerceIn(80L, 120L)
+        return platform.coerceIn(90L, 120L)
     }
 
     private fun toDisplayPixels(normalizedX: Float, normalizedY: Float): Pair<Float, Float> {
         val (w, h) = displaySize()
-        val x = (normalizedX.coerceIn(0f, 1f) * w).coerceIn(1f, (w - 2).toFloat().coerceAtLeast(1f))
-        val y = (normalizedY.coerceIn(0f, 1f) * h).coerceIn(1f, (h - 2).toFloat().coerceAtLeast(1f))
+        val x = (normalizedX.coerceIn(0f, 1f) * (w - 1).coerceAtLeast(1))
+            .coerceIn(1f, (w - 2).toFloat().coerceAtLeast(1f))
+        val y = (normalizedY.coerceIn(0f, 1f) * (h - 1).coerceAtLeast(1))
+            .coerceIn(1f, (h - 2).toFloat().coerceAtLeast(1f))
         return x to y
     }
 

@@ -12,9 +12,11 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -286,7 +288,8 @@ fun SessionScreen(
             var downNorm by remember { mutableStateOf<Pair<Float, Float>?>(null) }
             var maxDisplacementPx by remember { mutableFloatStateOf(0f) }
             val touchSlopPx = remember(context) {
-                ViewConfiguration.get(context).scaledTouchSlop.toFloat()
+                // Slightly larger than platform slop so tiny finger jitter stays a TAP.
+                ViewConfiguration.get(context).scaledTouchSlop.toFloat() * 1.35f
             }
             val streamReady = state.screenShareActive ||
                 state.sessionLinkState == SessionLinkState.STREAMING
@@ -309,7 +312,7 @@ fun SessionScreen(
                 }
             }
 
-            Box(
+            BoxWithConstraints(
                 modifier = Modifier
                     .fillMaxWidth()
                     .then(
@@ -321,8 +324,17 @@ fun SessionScreen(
                             Modifier.height(400.dp)
                         }
                     )
-                    .background(Color.Black)
+                    .background(Color.Black),
+                contentAlignment = Alignment.Center
             ) {
+                // Match Remote capture aspect so the touch surface == video pixels (no letterbox miss).
+                val videoAspect = videoW.toFloat() / videoH.toFloat().coerceAtLeast(1f)
+                val parentAspect = maxWidth / maxHeight.coerceAtLeast(1.dp)
+                val videoModifier = if (videoAspect > parentAspect) {
+                    Modifier.fillMaxWidth().aspectRatio(videoAspect)
+                } else {
+                    Modifier.fillMaxHeight().aspectRatio(videoAspect)
+                }
                 AndroidView(
                     factory = { ctx ->
                         SurfaceViewRenderer(ctx).also { renderer ->
@@ -353,7 +365,7 @@ fun SessionScreen(
                             onSwipe = onSwipe
                         )
                     },
-                    modifier = Modifier.fillMaxSize(),
+                    modifier = videoModifier,
                     onRelease = {
                         runCatching {
                             screenRenderer?.setOnTouchListener(null)
